@@ -168,7 +168,7 @@ router.post('/verify', protect, (req, res) => {
   res.json({
     success: true,
     message: 'Token is valid',
-    user: req.user
+    user: req.user.toJSON ? req.user.toJSON() : req.user
   });
 });
 
