@@ -19,8 +19,19 @@ const PORT = process.env.PORT || 5000;
 // Middleware
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+// CORS_ORIGIN accepts a comma-separated list so the deployed frontend and a
+// local `npm run dev` session can both reach the API.
+const allowedOrigins = (process.env.CORS_ORIGIN || 'http://localhost:5173')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+
 app.use(cors({
-  origin: process.env.CORS_ORIGIN || 'http://localhost:5173',
+  origin: (origin, callback) => {
+    // No origin: same-origin navigations, curl, and the Traccar forwarder.
+    if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+    callback(new Error(`Origin not allowed by CORS: ${origin}`));
+  },
   credentials: true
 }));
 
