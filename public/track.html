@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex, nofollow" />
+  <title>Live tracking · TrackOwl</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    :root { --bg:#0f172a; --panel:#1e293b; --line:#334155; --text:#f1f5f9; --muted:#94a3b8; --accent:#38bdf8; --ok:#22c55e; --idle:#f59e0b; --off:#64748b; }
+    * { box-sizing:border-box; margin:0; padding:0; }
+    body { font-family:system-ui,-apple-system,"Segoe UI",sans-serif; background:var(--bg); color:var(--text); height:100vh; display:flex; flex-direction:column; }
+    header { display:flex; align-items:center; gap:12px; padding:14px 18px; background:var(--panel); border-bottom:1px solid var(--line); }
+    .name { font-weight:600; font-size:1rem; }
+    .badge { display:inline-flex; align-items:center; gap:6px; margin-left:auto; padding:5px 11px; border-radius:999px; background:#0b1220; border:1px solid var(--line); font-size:.78rem; color:var(--muted); }
+    .dot { width:8px; height:8px; border-radius:50%; background:var(--off); }
+    .dot.moving { background:var(--ok); box-shadow:0 0 0 4px rgba(34,197,94,.18); }
+    .dot.idle { background:var(--idle); box-shadow:0 0 0 4px rgba(245,158,11,.18); }
+    #map { flex:1; background:#0b1220; }
+    footer { display:flex; flex-wrap:wrap; gap:10px; padding:12px 18px; background:var(--panel); border-top:1px solid var(--line); }
+    .stat { flex:1; min-width:88px; background:#0b1220; border:1px solid var(--line); border-radius:10px; padding:9px 12px; }
+    .stat .k { font-size:.66rem; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); }
+    .stat .v { font-size:1.05rem; font-weight:600; margin-top:2px; }
+    .msg { margin:auto; text-align:center; padding:40px 24px; }
+    .msg h1 { font-size:1.15rem; margin-bottom:8px; }
+    .msg p { color:var(--muted); font-size:.9rem; }
+    .leaflet-container { background:#0b1220; }
+  </style>
+</head>
+<body>
+  <div id="app"><div class="msg"><h1>Loading…</h1><p>Fetching the latest position.</p></div></div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    const token = location.pathname.split('/').filter(Boolean).pop();
+    const app = document.getElementById('app');
+    let map, marker, trail;
+
+    const fail = (title, detail) => {
+      app.innerHTML = `<div class="msg"><h1>${title}</h1><p>${detail}</p></div>`;
+    };
+
+    const shell = () => {
+      app.innerHTML = `
+        <header>
+          <span class="name" id="name">Vehicle</span>
+          <span class="badge"><span class="dot" id="dot"></span><span id="status">offline</span></span>
+        </header>
+        <div id="map"></div>
+        <footer>
+          <div class="stat"><div class="k">Speed</div><div class="v" id="speed">—</div></div>
+          <div class="stat"><div class="k">Ignition</div><div class="v" id="ignition">—</div></div>
+          <div class="stat"><div class="k">Last update</div><div class="v" id="seen">—</div></div>
+        </footer>`;
+
+      map = L.map('map', { zoomControl: true }).setView([20.5937, 78.9629], 5);
+      L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+        attribution: '&copy; OpenStreetMap &copy; CARTO',
+        maxZoom: 19
+      }).addTo(map);
+      trail = L.polyline([], { color: '#38bdf8', weight: 3, opacity: .75 }).addTo(map);
+    };
+
+    const ago = (iso) => {
+      if (!iso) return '—';
+      const s = Math.max(0, Math.round((Date.now() - new Date(iso)) / 1000));
+      if (s < 60) return s + 's ago';
+      if (s < 3600) return Math.round(s / 60) + 'm ago';
+      return Math.round(s / 3600) + 'h ago';
+    };
+
+    let first = true;
+
+    async function refresh() {
+      let data;
+      try {
+        const res = await fetch(`/api/track/public/${encodeURIComponent(token)}`);
+        data = await res.json();
+        if (!res.ok || !data.success) {
+          return fail('Link unavailable', data.error || 'This tracking link is invalid or has expired.');
+        }
+      } catch {
+        return; // transient network blip; keep the last good frame on screen
+      }
+
+      if (first) { shell(); first = false; }
+
+      const { device, position, trail: points } = data;
+      document.getElementById('name').textContent = device.name;
+      document.getElementById('status').textContent = device.status;
+      document.getElementById('dot').className = 'dot ' + device.status;
+      document.getElementById('seen').textContent = ago(device.lastSeenAt);
+
+      if (!position) {
+        document.getElementById('speed').textContent = '—';
+        document.getElementById('ignition').textContent = '—';
+        return;
+      }
+
+      document.getElementById('speed').textContent = Math.round(position.speed || 0) + ' km/h';
+      document.getElementById('ignition').textContent = position.ignition ? 'On' : 'Off';
+
+      const latlng = [position.latitude, position.longitude];
+      if (!marker) {
+        marker = L.circleMarker(latlng, {
+          radius: 9, color: '#0ea5e9', fillColor: '#38bdf8', fillOpacity: 1, weight: 3
+        }).addTo(map);
+        map.setView(latlng, 15);
+      } else {
+        marker.setLatLng(latlng);
+      }
+      trail.setLatLngs((points || []).map(p => [p.latitude, p.longitude]));
+    }
+
+    refresh();
+    setInterval(refresh, 5000);
+  </script>
+</body>
+</html>

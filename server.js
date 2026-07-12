@@ -2,10 +2,16 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import mongoose from 'mongoose';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import authRoutes from './routes/auth.js';
 import userRoutes from './routes/user.js';
+import traccarRoutes from './routes/traccar.js';
+import trackRoutes from './routes/track.js';
 
 dotenv.config();
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -26,6 +32,14 @@ mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/trackowl'
 // Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/user', userRoutes);
+app.use('/api/traccar', traccarRoutes);
+app.use('/api/track', trackRoutes);
+
+// Public tracking page. The token is validated by /api/track/public/:token,
+// which the page itself calls — this only serves the map shell.
+app.get('/track/:token', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'track.html'));
+});
 
 // Health check
 app.get('/api/health', (req, res) => {
