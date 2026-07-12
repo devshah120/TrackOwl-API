@@ -22,6 +22,28 @@ router.get('/devices', protect, async (req, res) => {
   }
 });
 
+// DELETE /api/track/devices/:id — remove a device and everything hanging off it.
+// Note this only clears our records; if the device is still registered in Traccar
+// and still reporting, the forward hook will simply recreate it on the next fix.
+router.delete('/devices/:id', protect, async (req, res) => {
+  try {
+    const device = await Device.findByIdAndDelete(req.params.id);
+    if (!device) {
+      return res.status(404).json({ success: false, error: 'Device not found' });
+    }
+
+    // Don't leave orphaned positions or live share links behind.
+    await Promise.all([
+      Position.deleteMany({ device: device._id }),
+      TrackToken.deleteMany({ device: device._id })
+    ]);
+
+    res.json({ success: true, message: `Removed ${device.name}` });
+  } catch (error) {
+    res.status(500).json({ success: false, error: 'Failed to delete device' });
+  }
+});
+
 // POST /api/track/tokens — issue a short-lived public link for one device
 router.post('/tokens', protect, async (req, res) => {
   try {
