@@ -21,9 +21,12 @@ const deviceSchema = new mongoose.Schema({
     type: Number,
     index: true
   },
+  // Unset until a user claims the device. Every authenticated device query filters
+  // on this, so an unclaimed device is visible to nobody (and shareable by nobody).
   owner: {
     type: mongoose.Schema.Types.ObjectId,
-    ref: 'User'
+    ref: 'User',
+    index: true
   },
   // Denormalised copy of the newest position so the dashboard and the public
   // tracking page can render without scanning the positions collection.
