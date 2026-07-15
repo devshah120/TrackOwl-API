@@ -12,6 +12,10 @@
     body { font-family:system-ui,-apple-system,"Segoe UI",sans-serif; background:var(--bg); color:var(--text); height:100vh; display:flex; flex-direction:column; }
     header { display:flex; align-items:center; gap:12px; padding:14px 18px; background:var(--panel); border-bottom:1px solid var(--line); }
     .name { font-weight:600; font-size:1rem; }
+    .route { display:flex; align-items:center; gap:6px; font-size:.8rem; color:var(--muted); margin-left:14px; min-width:0; }
+    .route b { color:var(--text); font-weight:600; }
+    .route .arrow { color:var(--accent); }
+    .route .seg { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:120px; }
     .badge { display:inline-flex; align-items:center; gap:6px; margin-left:auto; padding:5px 11px; border-radius:999px; background:#0b1220; border:1px solid var(--line); font-size:.78rem; color:var(--muted); }
     .dot { width:8px; height:8px; border-radius:50%; background:var(--off); }
     .dot.moving { background:var(--ok); box-shadow:0 0 0 4px rgba(34,197,94,.18); }
@@ -35,6 +39,10 @@
     const token = location.pathname.split('/').filter(Boolean).pop();
     const app = document.getElementById('app');
     let map, marker, trail;
+    let routeFetched = false; // fetch the trip route once, regardless of outcome
+    let hasRoute = false;     // true only once a From→To route is actually on the map
+
+    const shortPlace = (name) => (name || '').split(',')[0].trim();
 
     const fail = (title, detail) => {
       app.innerHTML = `<div class="msg"><h1>${title}</h1><p>${detail}</p></div>`;
@@ -44,6 +52,11 @@
       app.innerHTML = `
         <header>
           <span class="name" id="name">Vehicle</span>
+          <span class="route" id="route" style="display:none;">
+            <span class="seg" id="routeFrom"></span>
+            <span class="arrow">→</span>
+            <span class="seg" id="routeTo"></span>
+          </span>
           <span class="badge"><span class="dot" id="dot"></span><span id="status">offline</span></span>
         </header>
         <div id="map"></div>
@@ -71,6 +84,40 @@
 
     let first = true;
 
+    // Fetch the trip's From→To route once and draw it under the live vehicle, so
+    // the client sees where the vehicle is going, not just where it is.
+    async function drawRoute() {
+      if (routeFetched) return;
+      routeFetched = true; // even on failure, don't retry every 5s
+      let trip;
+      try {
+        const res = await fetch(`/api/trips/public/${encodeURIComponent(token)}`);
+        const data = await res.json();
+        if (!res.ok || !data.success || !data.trip) return;
+        trip = data.trip;
+      } catch { return; }
+
+      const { origin, destination, routePolyline } = trip;
+      const line = (routePolyline && routePolyline.length)
+        ? routePolyline
+        : [[origin.lat, origin.lng], [destination.lat, destination.lng]];
+
+      L.polyline(line, { color: '#a855f7', weight: 5, opacity: .65 }).addTo(map);
+      L.circleMarker([origin.lat, origin.lng], { radius: 7, color: '#16a34a', fillColor: '#22c55e', fillOpacity: 1, weight: 2 })
+        .addTo(map).bindPopup('From: ' + origin.name);
+      L.circleMarker([destination.lat, destination.lng], { radius: 7, color: '#dc2626', fillColor: '#ef4444', fillOpacity: 1, weight: 2 })
+        .addTo(map).bindPopup('To: ' + destination.name);
+      map.fitBounds(L.latLngBounds(line), { padding: [40, 40] });
+      hasRoute = true;
+
+      const routeEl = document.getElementById('route');
+      if (routeEl) {
+        document.getElementById('routeFrom').textContent = shortPlace(origin.name);
+        document.getElementById('routeTo').textContent = shortPlace(destination.name);
+        routeEl.style.display = 'flex';
+      }
+    }
+
     async function refresh() {
       let data;
       try {
@@ -83,7 +130,7 @@
         return; // transient network blip; keep the last good frame on screen
       }
 
-      if (first) { shell(); first = false; }
+      if (first) { shell(); first = false; drawRoute(); }
 
       const { device, position, trail: points } = data;
       document.getElementById('name').textContent = device.name;
@@ -105,7 +152,9 @@
         marker = L.circleMarker(latlng, {
           radius: 9, color: '#0ea5e9', fillColor: '#38bdf8', fillOpacity: 1, weight: 3
         }).addTo(map);
-        map.setView(latlng, 15);
+        // If a From→To route is on screen, keep it framed rather than zooming to
+        // the vehicle — the client wants to see the whole journey.
+        if (!hasRoute) map.setView(latlng, 15);
       } else {
         marker.setLatLng(latlng);
       }

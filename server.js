@@ -8,6 +8,7 @@ import authRoutes from './routes/auth.js';
 import userRoutes from './routes/user.js';
 import traccarRoutes from './routes/traccar.js';
 import trackRoutes from './routes/track.js';
+import tripRoutes from './routes/trips.js';
 
 dotenv.config();
 
@@ -45,6 +46,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/user', userRoutes);
 app.use('/api/traccar', traccarRoutes);
 app.use('/api/track', trackRoutes);
+app.use('/api/trips', tripRoutes);
 
 // Public tracking page. The token is validated by /api/track/public/:token,
 // which the page itself calls — this only serves the map shell.
