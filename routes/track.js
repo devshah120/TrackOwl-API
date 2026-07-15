@@ -36,13 +36,32 @@ const generateUniqueId = () =>
 // ---------------------------------------------------------------------------
 
 // Devices arriving from Traccar have no owner until a user claims them, so every
-// device query is scoped to the caller. Without this, one customer sees another
-// customer's trucks — and could mint a public share link for them.
+// device *mutation* (delete, share) stays scoped to the caller. Without this, one
+// customer could delete or mint a public share link for another customer's truck.
 const ownedBy = (req) => ({ owner: req.user._id });
 
-// GET /api/track/devices — only the caller's devices, newest activity first
+// GET /api/track/devices — the caller's own devices plus any still-unclaimed ones.
+//
+// Devices added straight in the Traccar admin portal (or a phone switched on
+// before it was registered through the app) land in Mongo via the forward hook
+// with no owner. Listing those alongside the caller's own devices means such a
+// device shows up in the frontend as soon as it reports its first position —
+// "auto-adopt", no separate claim step. Newest activity first.
+//
+// NOTE: mutating a device (delete / share link) still requires ownership, so an
+// unclaimed device is visible-but-read-only until adopted. In a multi-tenant
+// deployment every account would see every unclaimed device here; that is the
+// deliberate trade for zero-touch adoption on a single-account install.
 router.get('/devices', protect, async (req, res) => {
   try {
+    // Adopt every currently-unclaimed device to the caller, so it stops being an
+    // orphan and becomes fully usable (shareable, deletable) — not just visible.
+    // First caller to list wins; already-owned devices are untouched.
+    await Device.updateMany(
+      { owner: { $exists: false } },
+      { $set: { owner: req.user._id } }
+    );
+
     const devices = await Device.find(ownedBy(req)).sort({ lastSeenAt: -1 });
     res.json({ success: true, devices });
   } catch (error) {
@@ -91,18 +110,35 @@ router.post('/devices', protect, async (req, res) => {
     }
 
     // Register in Traccar first — if this fails there is no point creating our record,
-    // since the phone's positions would be rejected at the gateway.
+    // since the device's positions would be rejected at the gateway.
+    //
+    // We've already ruled out a Mongo duplicate above, so if Traccar reports the
+    // uniqueId is taken (400), it's an orphan: a device left in the gateway from a
+    // registration that failed before it reached Mongo (or after it was deleted
+    // from Mongo only). Reuse that device instead of dead-ending — otherwise the
+    // IMEI is permanently unregisterable through the UI. This makes registration
+    // self-healing rather than requiring a manual curl to the gateway.
     let traccarDevice;
     try {
       traccarDevice = await traccar.createDevice({ name, uniqueId });
     } catch (err) {
-      const clash = err.status === 400;
-      return res.status(clash ? 409 : 502).json({
-        success: false,
-        error: clash
-          ? 'That device ID is already registered in the gateway'
-          : `Could not reach the Traccar gateway: ${err.message}`
-      });
+      if (err.status === 400) {
+        try {
+          traccarDevice = await traccar.findDeviceByUniqueId(uniqueId);
+        } catch { /* fall through to the error below */ }
+        if (!traccarDevice) {
+          return res.status(409).json({
+            success: false,
+            error: 'That device ID is already registered in the gateway'
+          });
+        }
+        console.warn(`[track] reusing orphaned gateway device ${uniqueId} (traccarId=${traccarDevice.id})`);
+      } else {
+        return res.status(502).json({
+          success: false,
+          error: `Could not reach the Traccar gateway: ${err.message}`
+        });
+      }
     }
 
     const device = await Device.create({

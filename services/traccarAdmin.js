@@ -41,6 +41,14 @@ const request = async (path, options = {}) => {
 
 export const listDevices = () => request('/api/devices');
 
+// Fetch the single device with this uniqueId, or null if the gateway has none.
+// Traccar filters server-side when given a uniqueId query param, so this stays
+// cheap even with a large fleet.
+export const findDeviceByUniqueId = async (uniqueId) => {
+  const matches = await request(`/api/devices?uniqueId=${encodeURIComponent(uniqueId)}`);
+  return Array.isArray(matches) && matches.length ? matches[0] : null;
+};
+
 // Traccar returns 400 with a constraint message if uniqueId is taken.
 export const createDevice = ({ name, uniqueId }) =>
   request('/api/devices', {
