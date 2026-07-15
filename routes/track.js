@@ -15,6 +15,15 @@ const MAX_TTL_MINUTES = 60 * 24 * 7; // a share link may not outlive one week
 const phoneServerUrl = () =>
   process.env.TRACCAR_PHONE_URL || 'http://103.212.121.139:5055';
 
+// Hardware trackers (e.g. Teltonika FMB920) speak the binary Teltonika protocol
+// on 5027. Unlike the phone they take Domain + Port as separate fields, so the
+// setup block for them is split rather than a single URL.
+const hardwareHost = () => process.env.TRACCAR_HARDWARE_HOST || '103.212.121.139';
+const hardwarePort = () => process.env.TRACCAR_HARDWARE_PORT || '5027';
+
+// A hardware unit's identity is its IMEI: 15–17 digits, baked into the device.
+const isValidImei = (value) => /^\d{15,17}$/.test(value);
+
 // Short, unambiguous device ids: no vowels (kills accidental words) and no
 // 0/O/1/I, since these get typed by hand into a phone.
 const generateUniqueId = () =>
@@ -58,8 +67,24 @@ router.post('/devices', protect, async (req, res) => {
       });
     }
 
-    // Caller may supply a memorable id (e.g. a number plate); otherwise generate one.
-    const uniqueId = String(req.body.uniqueId || '').trim().toLowerCase() || generateUniqueId();
+    // 'phone' (Traccar Client app, OsmAnd/5055) or 'hardware' (Teltonika/5027).
+    const type = req.body.type === 'hardware' ? 'hardware' : 'phone';
+
+    // A hardware unit's uniqueId is its IMEI — fixed in the device, so it's
+    // required and validated. A phone id may be supplied (e.g. a number plate)
+    // or generated. IMEIs are digits, so lowercasing is safe for both.
+    let uniqueId;
+    if (type === 'hardware') {
+      uniqueId = String(req.body.uniqueId || '').trim();
+      if (!isValidImei(uniqueId)) {
+        return res.status(400).json({
+          success: false,
+          error: 'A valid IMEI (15–17 digits) is required for a GPS device'
+        });
+      }
+    } else {
+      uniqueId = String(req.body.uniqueId || '').trim().toLowerCase() || generateUniqueId();
+    }
 
     if (await Device.findOne({ uniqueId })) {
       return res.status(409).json({ success: false, error: 'That device ID is already in use' });
@@ -91,11 +116,22 @@ router.post('/devices', protect, async (req, res) => {
       success: true,
       message: `${name} registered`,
       device,
-      // Everything the user must type into the phone.
-      setup: {
-        serverUrl: phoneServerUrl(),
-        deviceIdentifier: uniqueId
-      }
+      // Everything the user must enter to point the device at the gateway.
+      // Shape differs by type: the phone takes one URL; hardware takes the
+      // Domain/Port/Protocol fields shown on the FMB920 config screen.
+      setup: type === 'hardware'
+        ? {
+            type: 'hardware',
+            domain: hardwareHost(),
+            port: hardwarePort(),
+            protocol: 'TCP',
+            deviceIdentifier: uniqueId  // the IMEI, for reference
+          }
+        : {
+            type: 'phone',
+            serverUrl: phoneServerUrl(),
+            deviceIdentifier: uniqueId
+          }
     });
   } catch (error) {
     console.error('[track] device registration failed:', error.message);
