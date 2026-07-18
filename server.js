@@ -40,6 +40,9 @@ app.use(cors({
   credentials: true
 }));
 
+// Static assets for the public tracking page (truck-icon.png, etc).
+app.use(express.static(path.join(__dirname, 'public')));
+
 // MongoDB Connection
 mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/trackowl')
   .then(() => console.log('✓ MongoDB connected'))
