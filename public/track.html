@@ -9,7 +9,9 @@
   <style>
     :root { --bg:#0f172a; --panel:#1e293b; --line:#334155; --text:#f1f5f9; --muted:#94a3b8; --accent:#38bdf8; --ok:#22c55e; --idle:#f59e0b; --off:#64748b; }
     * { box-sizing:border-box; margin:0; padding:0; }
-    body { font-family:system-ui,-apple-system,"Segoe UI",sans-serif; background:var(--bg); color:var(--text); height:100vh; display:flex; flex-direction:column; }
+    html, body { height:100%; }
+    body { font-family:system-ui,-apple-system,"Segoe UI",sans-serif; background:var(--bg); color:var(--text); margin:0; }
+    #app { height:100%; display:flex; flex-direction:column; }
     header { display:flex; align-items:center; gap:12px; padding:14px 18px; background:var(--panel); border-bottom:1px solid var(--line); }
     .name { font-weight:600; font-size:1rem; }
     .route { display:flex; align-items:center; gap:6px; font-size:.8rem; color:var(--muted); margin-left:14px; min-width:0; }
