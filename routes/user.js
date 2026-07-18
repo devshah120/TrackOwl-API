@@ -29,13 +29,26 @@ router.get('/profile', protect, async (req, res) => {
 // Update user profile
 router.put('/profile', protect, async (req, res) => {
   try {
-    const { name, mobile, company, fleet } = req.body;
+    const { name, mobile, company, fleet, address, city, gstNumber, panNumber, bankDetails } = req.body;
     const updates = {};
 
     if (name) updates.name = name.trim();
     if (mobile) updates.mobile = mobile.replace(/\D/g, '');
     if (company) updates.company = company.trim();
     if (fleet) updates.fleet = fleet;
+    if (address !== undefined) updates.address = address.trim();
+    if (city !== undefined) updates.city = city.trim();
+    if (gstNumber !== undefined) updates.gstNumber = gstNumber.trim();
+    if (panNumber !== undefined) updates.panNumber = panNumber.trim();
+    if (bankDetails && typeof bankDetails === 'object') {
+      updates.bankDetails = {
+        accountName: String(bankDetails.accountName || '').trim(),
+        accountNumber: String(bankDetails.accountNumber || '').trim(),
+        bankName: String(bankDetails.bankName || '').trim(),
+        ifscCode: String(bankDetails.ifscCode || '').trim(),
+        branchName: String(bankDetails.branchName || '').trim()
+      };
+    }
 
     const user = await User.findByIdAndUpdate(
       req.user.id,

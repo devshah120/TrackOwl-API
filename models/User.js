@@ -36,6 +36,21 @@ const userSchema = new mongoose.Schema({
     enum: ['1–5 trucks', '6–20 trucks', '21–50 trucks', '50+ trucks'],
     required: [true, 'Fleet size is required']
   },
+  address: { type: String, trim: true, default: '' },
+  city: { type: String, trim: true, default: '' },
+  gstNumber: { type: String, trim: true, default: '' },
+  panNumber: { type: String, trim: true, default: '' },
+  bankDetails: {
+    type: {
+      accountName: { type: String, trim: true, default: '' },
+      accountNumber: { type: String, trim: true, default: '' },
+      bankName: { type: String, trim: true, default: '' },
+      ifscCode: { type: String, trim: true, default: '' },
+      branchName: { type: String, trim: true, default: '' }
+    },
+    default: () => ({}),
+    _id: false
+  },
   role: {
     type: String,
     enum: ['admin', 'client'],
