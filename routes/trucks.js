@@ -1,5 +1,6 @@
 import express from 'express';
 import Truck from '../models/Truck.js';
+import Notification from '../models/Notification.js';
 import { protect } from '../middleware/auth.js';
 
 const router = express.Router();
@@ -51,6 +52,15 @@ router.post('/', protect, async (req, res) => {
     }
 
     const truck = await Truck.create({ ...fields, owner: req.user._id });
+
+    Notification.create({
+      owner: req.user._id,
+      type: 'event',
+      title: 'Truck Added',
+      message: `Truck ${truck.number} added to fleet${truck.driver?.name ? ` with driver ${truck.driver.name}` : ''}`,
+      vehicle: truck.number
+    }).catch((err) => console.error('[trucks] notification failed:', err.message));
+
     res.status(201).json({ success: true, truck });
   } catch (error) {
     console.error('[trucks] create failed:', error.message);

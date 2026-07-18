@@ -1,5 +1,6 @@
 import express from 'express';
 import BillingTrip from '../models/BillingTrip.js';
+import Notification from '../models/Notification.js';
 import { protect } from '../middleware/auth.js';
 
 const router = express.Router();
@@ -44,6 +45,15 @@ router.post('/', protect, async (req, res) => {
     }
 
     const billingTrip = await BillingTrip.create({ ...fields, owner: req.user._id });
+
+    Notification.create({
+      owner: req.user._id,
+      type: 'event',
+      title: 'Trip Added',
+      message: `Trip for ${billingTrip.partyName} (${billingTrip.truck}) added — ₹${billingTrip.amount.toLocaleString()}`,
+      vehicle: billingTrip.truck
+    }).catch((err) => console.error('[billing] notification failed:', err.message));
+
     res.status(201).json({ success: true, billingTrip });
   } catch (error) {
     console.error('[billing] create failed:', error.message);
@@ -55,12 +65,25 @@ router.post('/', protect, async (req, res) => {
 router.put('/:id', protect, async (req, res) => {
   try {
     const fields = buildBillingFields(req.body || {});
+    const before = await BillingTrip.findOne({ _id: req.params.id, ...ownedBy(req) }).select('status');
+    if (!before) return res.status(404).json({ success: false, error: 'Billing trip not found' });
+
     const billingTrip = await BillingTrip.findOneAndUpdate(
       { _id: req.params.id, ...ownedBy(req) },
       { $set: fields },
       { new: true, runValidators: true }
     );
-    if (!billingTrip) return res.status(404).json({ success: false, error: 'Billing trip not found' });
+
+    if (fields.status === 'Paid' && before.status !== 'Paid') {
+      Notification.create({
+        owner: req.user._id,
+        type: 'event',
+        title: 'Trip Completed',
+        message: `Payment recorded for ${billingTrip.partyName} (${billingTrip.truck}) — ₹${billingTrip.amount.toLocaleString()}`,
+        vehicle: billingTrip.truck
+      }).catch((err) => console.error('[billing] notification failed:', err.message));
+    }
+
     res.json({ success: true, billingTrip });
   } catch (error) {
     res.status(500).json({ success: false, error: 'Failed to update billing trip' });

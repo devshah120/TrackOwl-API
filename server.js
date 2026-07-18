@@ -12,6 +12,7 @@ import tripRoutes from './routes/trips.js';
 import truckRoutes from './routes/trucks.js';
 import ledgerRoutes from './routes/ledger.js';
 import billingRoutes from './routes/billing.js';
+import notificationRoutes from './routes/notifications.js';
 
 dotenv.config();
 
@@ -53,6 +54,7 @@ app.use('/api/trips', tripRoutes);
 app.use('/api/trucks', truckRoutes);
 app.use('/api/ledger', ledgerRoutes);
 app.use('/api/billing-trips', billingRoutes);
+app.use('/api/notifications', notificationRoutes);
 
 // Public tracking page. The token is validated by /api/track/public/:token,
 // which the page itself calls — this only serves the map shell.
