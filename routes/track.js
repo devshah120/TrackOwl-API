@@ -1,35 +1,14 @@
 import express from 'express';
-import crypto from 'crypto';
 import Device from '../models/Device.js';
 import Position from '../models/Position.js';
 import TrackToken from '../models/TrackToken.js';
 import { protect } from '../middleware/auth.js';
 import * as traccar from '../services/traccarAdmin.js';
+import { registerDevice } from '../services/deviceRegistration.js';
 
 const router = express.Router();
 
 const MAX_TTL_MINUTES = 60 * 24 * 7; // a share link may not outlive one week
-
-// What the user types into the Traccar Client app. The phone talks the OsmAnd
-// protocol on 5055 — never the web-UI port.
-const phoneServerUrl = () =>
-  process.env.TRACCAR_PHONE_URL || 'http://103.212.121.139:5055';
-
-// Hardware trackers (e.g. Teltonika FMB920) speak the binary Teltonika protocol
-// on 5027. Unlike the phone they take Domain + Port as separate fields, so the
-// setup block for them is split rather than a single URL.
-const hardwareHost = () => process.env.TRACCAR_HARDWARE_HOST || '103.212.121.139';
-const hardwarePort = () => process.env.TRACCAR_HARDWARE_PORT || '5027';
-
-// A hardware unit's identity is its IMEI: 15–17 digits, baked into the device.
-const isValidImei = (value) => /^\d{15,17}$/.test(value);
-
-// Short, unambiguous device ids: no vowels (kills accidental words) and no
-// 0/O/1/I, since these get typed by hand into a phone.
-const generateUniqueId = () =>
-  'trk-' + Array.from(crypto.randomBytes(6))
-    .map((b) => '23456789abcdefghjkmnpqrstuvwxyz'[b % 30])
-    .join('');
 
 // ---------------------------------------------------------------------------
 // Authenticated: fleet owner manages devices and share links
@@ -74,102 +53,23 @@ router.get('/devices', protect, async (req, res) => {
 // Returns the exact settings to type into the Traccar Client app.
 router.post('/devices', protect, async (req, res) => {
   try {
-    const name = String(req.body.name || '').trim();
-    if (!name) {
-      return res.status(400).json({ success: false, error: 'Vehicle name is required' });
-    }
-
-    if (!traccar.isConfigured()) {
-      return res.status(503).json({
-        success: false,
-        error: 'Traccar admin credentials are not configured on the server'
-      });
-    }
-
-    // 'phone' (Traccar Client app, OsmAnd/5055) or 'hardware' (Teltonika/5027).
-    const type = req.body.type === 'hardware' ? 'hardware' : 'phone';
-
-    // A hardware unit's uniqueId is its IMEI — fixed in the device, so it's
-    // required and validated. A phone id may be supplied (e.g. a number plate)
-    // or generated. IMEIs are digits, so lowercasing is safe for both.
-    let uniqueId;
-    if (type === 'hardware') {
-      uniqueId = String(req.body.uniqueId || '').trim();
-      if (!isValidImei(uniqueId)) {
-        return res.status(400).json({
-          success: false,
-          error: 'A valid IMEI (15–17 digits) is required for a GPS device'
-        });
-      }
-    } else {
-      uniqueId = String(req.body.uniqueId || '').trim().toLowerCase() || generateUniqueId();
-    }
-
-    if (await Device.findOne({ uniqueId })) {
-      return res.status(409).json({ success: false, error: 'That device ID is already in use' });
-    }
-
-    // Register in Traccar first — if this fails there is no point creating our record,
-    // since the device's positions would be rejected at the gateway.
-    //
-    // We've already ruled out a Mongo duplicate above, so if Traccar reports the
-    // uniqueId is taken (400), it's an orphan: a device left in the gateway from a
-    // registration that failed before it reached Mongo (or after it was deleted
-    // from Mongo only). Reuse that device instead of dead-ending — otherwise the
-    // IMEI is permanently unregisterable through the UI. This makes registration
-    // self-healing rather than requiring a manual curl to the gateway.
-    let traccarDevice;
-    try {
-      traccarDevice = await traccar.createDevice({ name, uniqueId });
-    } catch (err) {
-      if (err.status === 400) {
-        try {
-          traccarDevice = await traccar.findDeviceByUniqueId(uniqueId);
-        } catch { /* fall through to the error below */ }
-        if (!traccarDevice) {
-          return res.status(409).json({
-            success: false,
-            error: 'That device ID is already registered in the gateway'
-          });
-        }
-        console.warn(`[track] reusing orphaned gateway device ${uniqueId} (traccarId=${traccarDevice.id})`);
-      } else {
-        return res.status(502).json({
-          success: false,
-          error: `Could not reach the Traccar gateway: ${err.message}`
-        });
-      }
-    }
-
-    const device = await Device.create({
-      uniqueId,
-      name,
-      traccarId: traccarDevice.id,
-      owner: req.user._id
+    const { device, setup } = await registerDevice({
+      name: req.body.name,
+      type: req.body.type,
+      uniqueId: req.body.uniqueId,
+      ownerId: req.user._id
     });
 
     res.status(201).json({
       success: true,
-      message: `${name} registered`,
+      message: `${device.name} registered`,
       device,
-      // Everything the user must enter to point the device at the gateway.
-      // Shape differs by type: the phone takes one URL; hardware takes the
-      // Domain/Port/Protocol fields shown on the FMB920 config screen.
-      setup: type === 'hardware'
-        ? {
-            type: 'hardware',
-            domain: hardwareHost(),
-            port: hardwarePort(),
-            protocol: 'TCP',
-            deviceIdentifier: uniqueId  // the IMEI, for reference
-          }
-        : {
-            type: 'phone',
-            serverUrl: phoneServerUrl(),
-            deviceIdentifier: uniqueId
-          }
+      setup
     });
   } catch (error) {
+    if (error.status) {
+      return res.status(error.status).json({ success: false, error: error.message });
+    }
     console.error('[track] device registration failed:', error.message);
     res.status(500).json({ success: false, error: 'Failed to register device' });
   }

@@ -5,6 +5,7 @@ import Device from '../models/Device.js';
 import LedgerEntry from '../models/LedgerEntry.js';
 import Notification from '../models/Notification.js';
 import { protect, requireSuperAdmin } from '../middleware/auth.js';
+import { registerDevice } from '../services/deviceRegistration.js';
 
 const router = express.Router();
 
@@ -50,6 +51,52 @@ router.patch('/users/:id/status', async (req, res) => {
     res.json({ success: true, user });
   } catch (error) {
     res.status(500).json({ success: false, error: 'Failed to update client status' });
+  }
+});
+
+// PUT /api/admin/users/:id — edit a client's profile fields.
+router.put('/users/:id', async (req, res) => {
+  try {
+    const { name, email, mobile, company, fleet } = req.body || {};
+    const updates = {};
+    if (name !== undefined) updates.name = String(name).trim();
+    if (email !== undefined) updates.email = String(email).trim().toLowerCase();
+    if (mobile !== undefined) updates.mobile = String(mobile).replace(/\D/g, '');
+    if (company !== undefined) updates.company = String(company).trim();
+    if (fleet !== undefined) updates.fleet = fleet;
+
+    const user = await User.findOneAndUpdate(
+      { _id: req.params.id, role: 'client' },
+      { $set: updates },
+      { new: true, runValidators: true }
+    );
+    if (!user) return res.status(404).json({ success: false, error: 'Client not found' });
+
+    res.json({ success: true, user });
+  } catch (error) {
+    if (error.code === 11000) {
+      return res.status(409).json({ success: false, error: 'That email is already in use' });
+    }
+    res.status(500).json({ success: false, error: error.message || 'Failed to update client' });
+  }
+});
+
+// DELETE /api/admin/users/:id — remove a client account and everything they own.
+router.delete('/users/:id', async (req, res) => {
+  try {
+    const user = await User.findOneAndDelete({ _id: req.params.id, role: 'client' });
+    if (!user) return res.status(404).json({ success: false, error: 'Client not found' });
+
+    await Promise.all([
+      Truck.deleteMany({ owner: user._id }),
+      Device.updateMany({ owner: user._id }, { $unset: { owner: '' } }),
+      LedgerEntry.deleteMany({ owner: user._id }),
+      Notification.deleteMany({ owner: user._id })
+    ]);
+
+    res.json({ success: true, message: 'Client removed' });
+  } catch (error) {
+    res.status(500).json({ success: false, error: 'Failed to delete client' });
   }
 });
 
@@ -139,6 +186,43 @@ router.delete('/trucks/:id', async (req, res) => {
     res.json({ success: true, message: 'Truck removed' });
   } catch (error) {
     res.status(500).json({ success: false, error: 'Failed to delete truck' });
+  }
+});
+
+// POST /api/admin/devices — register a tracking device (phone or hardware) on
+// behalf of a chosen client. Same gateway-registration flow as a client's own
+// POST /api/track/devices, just with an explicit owner instead of the caller.
+router.post('/devices', async (req, res) => {
+  try {
+    const { owner } = req.body || {};
+    if (!owner) {
+      return res.status(400).json({ success: false, error: 'owner (client id) is required' });
+    }
+
+    const ownerUser = await User.findOne({ _id: owner, role: 'client' });
+    if (!ownerUser) {
+      return res.status(404).json({ success: false, error: 'Client not found' });
+    }
+
+    const { device, setup } = await registerDevice({
+      name: req.body.name,
+      type: req.body.type,
+      uniqueId: req.body.uniqueId,
+      ownerId: owner
+    });
+
+    res.status(201).json({
+      success: true,
+      message: `${device.name} registered for ${ownerUser.company}`,
+      device,
+      setup
+    });
+  } catch (error) {
+    if (error.status) {
+      return res.status(error.status).json({ success: false, error: error.message });
+    }
+    console.error('[admin] device registration failed:', error.message);
+    res.status(500).json({ success: false, error: 'Failed to register device' });
   }
 });
 
