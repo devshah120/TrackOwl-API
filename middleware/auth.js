@@ -31,3 +31,14 @@ export const protect = async (req, res, next) => {
     });
   }
 };
+
+// Gate a route to superadmin only. Must run after `protect`, which sets req.user.
+export const requireSuperAdmin = (req, res, next) => {
+  if (req.user?.role !== 'superadmin') {
+    return res.status(403).json({
+      success: false,
+      error: 'Superadmin access required'
+    });
+  }
+  next();
+};
