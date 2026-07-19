@@ -4,6 +4,7 @@ import Device from '../models/Device.js';
 import Position from '../models/Position.js';
 import TrackToken from '../models/TrackToken.js';
 import { protect } from '../middleware/auth.js';
+import { sendTripCreatedEmail, sendTripCompletedEmail } from '../services/emailService.js';
 
 const router = express.Router();
 
@@ -84,6 +85,14 @@ router.post('/', protect, async (req, res) => {
     });
 
     const populated = await trip.populate('device', 'name uniqueId lastPosition lastSeenAt');
+
+    // Notify the fleet owner that a trip was created. Fire-and-forget: a mail
+    // failure must never fail the request or leave a trip half-created.
+    if (req.user?.email) {
+      sendTripCreatedEmail(req.user.email, req.user.name, populated, populated.device?.name)
+        .catch((err) => console.error('[trips] created email failed:', err.message));
+    }
+
     res.status(201).json({ success: true, trip: populated });
   } catch (error) {
     console.error('[trips] create failed:', error.message);
@@ -105,6 +114,11 @@ router.patch('/:id', protect, async (req, res) => {
     }
     if (req.body.note !== undefined) updates.note = String(req.body.note).trim();
 
+    // Read the current status first so we only email on an actual transition
+    // into 'completed' — not on every PATCH that re-sends the same status.
+    const existing = await Trip.findOne({ _id: req.params.id, ...ownedBy(req) }).select('status');
+    if (!existing) return res.status(404).json({ success: false, error: 'Trip not found' });
+
     const trip = await Trip.findOneAndUpdate(
       { _id: req.params.id, ...ownedBy(req) },
       { $set: updates },
@@ -112,6 +126,14 @@ router.patch('/:id', protect, async (req, res) => {
     ).populate('device', 'name uniqueId lastPosition lastSeenAt');
 
     if (!trip) return res.status(404).json({ success: false, error: 'Trip not found' });
+
+    // Notify the fleet owner when a trip becomes completed. Fire-and-forget so a
+    // mail failure never fails the update.
+    if (updates.status === 'completed' && existing.status !== 'completed' && req.user?.email) {
+      sendTripCompletedEmail(req.user.email, req.user.name, trip, trip.device?.name)
+        .catch((err) => console.error('[trips] completed email failed:', err.message));
+    }
+
     res.json({ success: true, trip });
   } catch (error) {
     res.status(500).json({ success: false, error: 'Failed to update trip' });
