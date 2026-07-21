@@ -14,6 +14,7 @@ import ledgerRoutes from './routes/ledger.js';
 import billingRoutes from './routes/billing.js';
 import notificationRoutes from './routes/notifications.js';
 import adminRoutes from './routes/admin.js';
+import geoRoutes from './routes/geo.js';
 
 dotenv.config();
 
@@ -23,8 +24,10 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 // Middleware
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// Trips can carry a long OSRM routePolyline (thousands of [lat, lng] points), so
+// raise the body limit above the 100kb default to avoid PayloadTooLargeError.
+app.use(express.json({ limit: '5mb' }));
+app.use(express.urlencoded({ extended: true, limit: '5mb' }));
 // CORS_ORIGIN accepts a comma-separated list so the deployed frontend and a
 // local `npm run dev` session can both reach the API.
 const allowedOrigins = (process.env.CORS_ORIGIN || 'http://localhost:5173')
@@ -60,6 +63,7 @@ app.use('/api/ledger', ledgerRoutes);
 app.use('/api/billing-trips', billingRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/geo', geoRoutes);
 
 // Public tracking page. The token is validated by /api/track/public/:token,
 // which the page itself calls — this only serves the map shell.
