@@ -36,8 +36,13 @@ router.get('/devices', protect, async (req, res) => {
     // Adopt every currently-unclaimed device to the caller, so it stops being an
     // orphan and becomes fully usable (shareable, deletable) — not just visible.
     // First caller to list wins; already-owned devices are untouched.
+    // An unclaimed device may store `owner` as either missing or an explicit
+    // null: the Traccar auto-registration upsert runs with setDefaultsOnInsert,
+    // which writes null for the unset ObjectId. Matching only `$exists: false`
+    // left those devices permanently unadoptable — and since the listing below
+    // filters on owner, permanently invisible.
     await Device.updateMany(
-      { owner: { $exists: false } },
+      { $or: [{ owner: { $exists: false } }, { owner: null }] },
       { $set: { owner: req.user._id } }
     );
 
@@ -84,7 +89,8 @@ router.post('/devices', protect, async (req, res) => {
 // yet. This is how a user discovers the uniqueId of a phone they just switched on.
 router.get('/devices/unclaimed', protect, async (req, res) => {
   try {
-    const devices = await Device.find({ owner: { $exists: false } })
+    // Same null-vs-missing caveat as the adopt query in GET /devices.
+    const devices = await Device.find({ $or: [{ owner: { $exists: false } }, { owner: null }] })
       .sort({ lastSeenAt: -1 })
       .select('uniqueId name lastSeenAt');
     res.json({ success: true, devices });
