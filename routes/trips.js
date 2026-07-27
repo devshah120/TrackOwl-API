@@ -13,6 +13,22 @@ const router = express.Router();
 // points still draws a smooth line without bloating the response.
 const MAX_TRAIL_POINTS = 2000;
 
+// A fix reported with an error radius this large is noise, not a location — it
+// is typically a cell-tower or wifi estimate rather than a real satellite lock,
+// and plotting it puts a spike in the trail.
+const MAX_ACCURACY_M = 5000;
+
+// Rejects fixes that would visibly corrupt the drawn trail. The `[0, 0]` case is
+// already excluded by the query; this additionally drops near-null coordinates
+// (a partial lock lands a fraction of a degree off Null Island, still thousands
+// of km from any real route) and low-confidence fixes.
+const isPlausibleFix = (p) => {
+  if (!Number.isFinite(p.latitude) || !Number.isFinite(p.longitude)) return false;
+  if (Math.abs(p.latitude) < 0.01 && Math.abs(p.longitude) < 0.01) return false;
+  if (p.accuracy != null && p.accuracy > MAX_ACCURACY_M) return false;
+  return true;
+};
+
 // Every trip belongs to the caller; a trip is publicly shareable, so an unscoped
 // query would let one account see (and share) another account's journeys.
 const ownedBy = (req) => ({ owner: req.user._id });
@@ -172,15 +188,30 @@ router.get('/:id/trail', protect, async (req, res) => {
 
     // Oldest-first is the draw order. The cap protects the response on a long
     // journey — a fast-reporting device can log thousands of fixes.
-    const fixes = await Position.find({ device: trip.device, fixTime: window })
+    //
+    // Only fixes the tracker itself flagged valid are drawn. A GPS module that
+    // hasn't locked yet reports [0, 0], and a single such point stretches the
+    // trail from the real route out into the Atlantic — which also drags the
+    // map's auto-framing out with it.
+    const fixes = await Position.find({
+      device: trip.device,
+      fixTime: window,
+      valid: { $ne: false },
+      latitude: { $ne: 0 },
+      longitude: { $ne: 0 },
+    })
       .sort({ fixTime: 1 })
       .limit(MAX_TRAIL_POINTS)
-      .select('latitude longitude fixTime -_id')
+      .select('latitude longitude accuracy fixTime -_id')
       .lean();
+
+    const trail = fixes
+      .filter(isPlausibleFix)
+      .map((p) => [p.latitude, p.longitude]);
 
     res.json({
       success: true,
-      trail: fixes.map((p) => [p.latitude, p.longitude]),
+      trail,
       startedAt: fixes[0]?.fixTime || null,
       endedAt: fixes[fixes.length - 1]?.fixTime || null,
     });
