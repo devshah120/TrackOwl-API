@@ -49,7 +49,12 @@ const tripSchema = new mongoose.Schema({
   },
   note: { type: String, trim: true, default: '' },
 
-  createdAt: { type: Date, default: Date.now }
+  createdAt: { type: Date, default: Date.now },
+
+  // When the trip actually finished. Set on the transition into 'completed', and
+  // used to bound the GPS fixes that make up the trip's actual-path trail — past
+  // this moment the device's fixes belong to some later journey, not this one.
+  completedAt: { type: Date, default: null }
 });
 
 tripSchema.set('toJSON', { virtuals: true });

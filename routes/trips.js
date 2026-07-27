@@ -8,6 +8,11 @@ import { sendTripCreatedEmail, sendTripCompletedEmail } from '../services/emailS
 
 const router = express.Router();
 
+// Upper bound on GPS fixes returned for one trip's actual-path trail. A device
+// reporting every few seconds over a long haul can accumulate thousands; 2000
+// points still draws a smooth line without bloating the response.
+const MAX_TRAIL_POINTS = 2000;
+
 // Every trip belongs to the caller; a trip is publicly shareable, so an unscoped
 // query would let one account see (and share) another account's journeys.
 const ownedBy = (req) => ({ owner: req.user._id });
@@ -119,6 +124,13 @@ router.patch('/:id', protect, async (req, res) => {
     const existing = await Trip.findOne({ _id: req.params.id, ...ownedBy(req) }).select('status');
     if (!existing) return res.status(404).json({ success: false, error: 'Trip not found' });
 
+    // Stamp the arrival time on the transition into 'completed' — it bounds the
+    // trip's actual-path trail. Only on the transition, so a repeat PATCH of the
+    // same status can't push the boundary forward and swallow a later journey.
+    if (updates.status === 'completed' && existing.status !== 'completed') {
+      updates.completedAt = new Date();
+    }
+
     const trip = await Trip.findOneAndUpdate(
       { _id: req.params.id, ...ownedBy(req) },
       { $set: updates },
@@ -137,6 +149,44 @@ router.patch('/:id', protect, async (req, res) => {
     res.json({ success: true, trip });
   } catch (error) {
     res.status(500).json({ success: false, error: 'Failed to update trip' });
+  }
+});
+
+// GET /api/trips/:id/trail — the path the vehicle actually drove for this trip,
+// as opposed to the planned `routePolyline`. Built from the stored GPS fixes for
+// the trip's device, windowed to the trip's own lifetime: from when the trip was
+// created until it completed (or now, if it is still running). Without that
+// window we'd draw every fix the device ever sent, including other journeys.
+//
+// Returns oldest-first [[lat, lng], ...] so the map can draw it as one line.
+router.get('/:id/trail', protect, async (req, res) => {
+  try {
+    const trip = await Trip.findOne({ _id: req.params.id, ...ownedBy(req) })
+      .select('device createdAt completedAt status');
+    if (!trip) return res.status(404).json({ success: false, error: 'Trip not found' });
+
+    // A completed trip stops collecting fixes at the moment it was marked
+    // arrived; an active one runs up to the present.
+    const window = { $gte: trip.createdAt };
+    if (trip.status === 'completed' && trip.completedAt) window.$lte = trip.completedAt;
+
+    // Oldest-first is the draw order. The cap protects the response on a long
+    // journey — a fast-reporting device can log thousands of fixes.
+    const fixes = await Position.find({ device: trip.device, fixTime: window })
+      .sort({ fixTime: 1 })
+      .limit(MAX_TRAIL_POINTS)
+      .select('latitude longitude fixTime -_id')
+      .lean();
+
+    res.json({
+      success: true,
+      trail: fixes.map((p) => [p.latitude, p.longitude]),
+      startedAt: fixes[0]?.fixTime || null,
+      endedAt: fixes[fixes.length - 1]?.fixTime || null,
+    });
+  } catch (error) {
+    console.error('[trips] trail lookup failed:', error.message);
+    res.status(500).json({ success: false, error: 'Failed to load trip trail' });
   }
 });
 
