@@ -41,7 +41,12 @@ router.get('/devices', protect, async (req, res) => {
       { $set: { owner: req.user._id } }
     );
 
-    const devices = await Device.find(ownedBy(req)).sort({ lastSeenAt: -1 });
+    // `owner` is populated because the map's marker popup shows the owning
+    // company. Left as a bare ObjectId it reads as `undefined` there and the
+    // popup falls back to "Unclaimed" — for a device that is in fact claimed.
+    const devices = await Device.find(ownedBy(req))
+      .populate('owner', 'name company')
+      .sort({ lastSeenAt: -1 });
     res.json({ success: true, devices });
   } catch (error) {
     res.status(500).json({ success: false, error: 'Failed to fetch devices' });
