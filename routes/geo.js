@@ -224,9 +224,9 @@ router.get('/route', protect, async (req, res) => {
 
   try {
     const route =
+      (await routeViaOsrm(from, to)) ||
       (await routeViaRoutesApi(from, to)) ||
-      (await routeViaDirectionsApi(from, to)) ||
-      (await routeViaOsrm(from, to));
+      (await routeViaDirectionsApi(from, to));
 
     if (!route) {
       return res.status(502).json({ success: false, error: 'Routing failed' });
