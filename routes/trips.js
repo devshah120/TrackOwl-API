@@ -140,6 +140,13 @@ router.patch('/:id', protect, async (req, res) => {
     const existing = await Trip.findOne({ _id: req.params.id, ...ownedBy(req) }).select('status');
     if (!existing) return res.status(404).json({ success: false, error: 'Trip not found' });
 
+    // Stamp the start time on the transition into 'active' — it marks the lower
+    // bound of the trip's actual-path trail. Only on the transition, so a repeat
+    // PATCH can't push the boundary and swallow fixes from a prior journey.
+    if (updates.status === 'active' && existing.status !== 'active') {
+      updates.startedAt = new Date();
+    }
+
     // Stamp the arrival time on the transition into 'completed' — it bounds the
     // trip's actual-path trail. Only on the transition, so a repeat PATCH of the
     // same status can't push the boundary forward and swallow a later journey.
@@ -178,12 +185,20 @@ router.patch('/:id', protect, async (req, res) => {
 router.get('/:id/trail', protect, async (req, res) => {
   try {
     const trip = await Trip.findOne({ _id: req.params.id, ...ownedBy(req) })
-      .select('device createdAt completedAt status');
+      .select('device createdAt startedAt completedAt status');
     if (!trip) return res.status(404).json({ success: false, error: 'Trip not found' });
 
-    // A completed trip stops collecting fixes at the moment it was marked
-    // arrived; an active one runs up to the present.
-    const window = { $gte: trip.createdAt };
+    // A trip that hasn't been started yet has no trail — its GPS fixes haven't
+    // begun accumulating.
+    if (!trip.startedAt) {
+      return res.json({ success: true, trail: [], startedAt: null, endedAt: null });
+    }
+
+    // The trail window starts at startedAt (when the user clicked "Start Trip")
+    // and ends at completedAt (when they clicked "End Trip") — or now if the
+    // trip is still running. This scopes each trip to only its own GPS fixes,
+    // even when the same device has multiple trips.
+    const window = { $gte: trip.startedAt };
     if (trip.status === 'completed' && trip.completedAt) window.$lte = trip.completedAt;
 
     // Oldest-first is the draw order. The cap protects the response on a long

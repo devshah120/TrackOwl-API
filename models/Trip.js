@@ -44,12 +44,18 @@ const tripSchema = new mongoose.Schema({
   status: {
     type: String,
     enum: ['planned', 'active', 'completed', 'cancelled'],
-    default: 'active',
+    default: 'planned',
     index: true
   },
   note: { type: String, trim: true, default: '' },
 
   createdAt: { type: Date, default: Date.now },
+
+  // When the user explicitly started the trip. Set on the transition into
+  // 'active', and used as the lower bound of the GPS fixes that make up the
+  // trip's actual-path trail — fixes before this moment belong to a previous
+  // journey, not this one.
+  startedAt: { type: Date, default: null },
 
   // When the trip actually finished. Set on the transition into 'completed', and
   // used to bound the GPS fixes that make up the trip's actual-path trail — past
