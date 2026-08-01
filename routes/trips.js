@@ -200,17 +200,12 @@ router.get('/:id/trail', protect, async (req, res) => {
       .select('device createdAt startedAt completedAt status');
     if (!trip) return res.status(404).json({ success: false, error: 'Trip not found' });
 
-    // A trip that hasn't been started yet has no trail — its GPS fixes haven't
-    // begun accumulating.
-    if (!trip.startedAt) {
-      return res.json({ success: true, trail: [], startedAt: null, endedAt: null });
-    }
-
-    // The trail window starts at startedAt (when the user clicked "Start Trip")
-    // and ends at completedAt (when they clicked "End Trip") — or now if the
-    // trip is still running. This scopes each trip to only its own GPS fixes,
-    // even when the same device has multiple trips.
-    const window = { $gte: trip.startedAt };
+    // The trail window starts at startedAt (when the user clicked "Start Trip"),
+    // or falls back to createdAt if startedAt is not set (e.g. legacy trips or
+    // trips created before explicit start). Ends at completedAt (when they clicked
+    // "End Trip") — or now if the trip is still running.
+    const startTime = trip.startedAt || trip.createdAt;
+    const window = { $gte: startTime };
     if (trip.status === 'completed' && trip.completedAt) window.$lte = trip.completedAt;
 
     // Oldest-first is the draw order. The cap protects the response on a long
