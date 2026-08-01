@@ -137,13 +137,25 @@ router.patch('/:id', protect, async (req, res) => {
 
     // Read the current status first so we only email on an actual transition
     // into 'completed' — not on every PATCH that re-sends the same status.
-    const existing = await Trip.findOne({ _id: req.params.id, ...ownedBy(req) }).select('status');
+    const existing = await Trip.findOne({ _id: req.params.id, ...ownedBy(req) }).select('status device');
     if (!existing) return res.status(404).json({ success: false, error: 'Trip not found' });
 
-    // Stamp the start time on the transition into 'active' — it marks the lower
-    // bound of the trip's actual-path trail. Only on the transition, so a repeat
-    // PATCH can't push the boundary and swallow fixes from a prior journey.
+    // Prevent starting a trip when another trip on the same device is already
+    // active — two concurrent trips on one vehicle would produce overlapping
+    // GPS trails, which is exactly the problem this feature solves.
     if (updates.status === 'active' && existing.status !== 'active') {
+      const conflict = await Trip.findOne({
+        device: existing.device,
+        status: 'active',
+        _id: { $ne: existing._id },
+        ...ownedBy(req),
+      }).select('_id');
+      if (conflict) {
+        return res.status(409).json({
+          success: false,
+          error: 'Another trip on this device is already active. Complete or cancel it first.',
+        });
+      }
       updates.startedAt = new Date();
     }
 
