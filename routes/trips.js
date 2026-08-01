@@ -66,7 +66,18 @@ router.get('/', protect, async (req, res) => {
 // the road route (OSRM) before calling this, so we just persist what it sends.
 router.post('/', protect, async (req, res) => {
   try {
-    const { deviceId, note = '', routePolyline, distanceKm, durationMin } = req.body || {};
+    const {
+      deviceId,
+      note = '',
+      routePolyline: reqPolyline,
+      distanceKm: reqDistanceKm,
+      durationMin: reqDurationMin,
+      route,
+    } = req.body || {};
+
+    const rawPolyline = reqPolyline || route?.polyline;
+    const distanceKm = reqDistanceKm ?? route?.distanceKm;
+    const durationMin = reqDurationMin ?? route?.durationMin;
 
     // Device must belong to the caller — no planning trips for other fleets.
     const device = await Device.findOne({ _id: deviceId, ...ownedBy(req) });
@@ -86,8 +97,8 @@ router.post('/', protect, async (req, res) => {
     // routePolyline arrives as [[lat, lng], ...]; keep only well-formed pairs so a
     // malformed client payload can't poison the stored geometry.
     let polyline;
-    if (Array.isArray(routePolyline)) {
-      polyline = routePolyline
+    if (Array.isArray(rawPolyline)) {
+      polyline = rawPolyline
         .filter((p) => Array.isArray(p) && p.length === 2 &&
           Number.isFinite(Number(p[0])) && Number.isFinite(Number(p[1])))
         .map((p) => [Number(p[0]), Number(p[1])]);

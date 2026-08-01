@@ -186,13 +186,34 @@ const routeViaDirectionsApi = async (from, to) => {
   };
 };
 
+// Road route via OSRM (free Open Source Routing Machine fallback).
+// Used if Google Routes API and Directions API are disabled or fail.
+const routeViaOsrm = async (from, to) => {
+  try {
+    const url = `https://router.project-osrm.org/route/v1/driving/${from.lng},${from.lat};${to.lng},${to.lat}?overview=full&geometries=geojson`;
+    const response = await fetch(url);
+    if (!response.ok) return null;
+    const data = await response.json();
+    const route = data.routes?.[0];
+    if (!route || !route.geometry?.coordinates) return null;
+
+    // OSRM returns coordinates as [lng, lat]; our app expects [[lat, lng], ...]
+    const polyline = route.geometry.coordinates.map(([lng, lat]) => [lat, lng]);
+
+    return {
+      polyline,
+      distanceKm: Math.round((route.distance / 1000) * 10) / 10,
+      durationMin: Math.round(route.duration / 60),
+    };
+  } catch (err) {
+    console.error('OSRM fallback routing failed:', err.message);
+    return null;
+  }
+};
+
 // GET /api/geo/route?fromLat=..&fromLng=..&toLat=..&toLng=..
-// Returns the same shape the frontend used to build from OSRM, so the map and
-// the Trip model did not have to change.
-//
-// Google is mid-migration from Directions to Routes, and a given Cloud project
-// may have either one enabled. We try Routes first and fall back, so whichever
-// the project has switched on is the one that gets used.
+// Returns the road route polyline and travel estimates.
+// Tries Google Routes API -> Google Directions API -> OSRM fallback.
 router.get('/route', protect, async (req, res) => {
   if (!guardKey(res)) return;
   const from = { lat: Number(req.query.fromLat), lng: Number(req.query.fromLng) };
@@ -202,7 +223,11 @@ router.get('/route', protect, async (req, res) => {
   }
 
   try {
-    const route = (await routeViaRoutesApi(from, to)) || (await routeViaDirectionsApi(from, to));
+    const route =
+      (await routeViaRoutesApi(from, to)) ||
+      (await routeViaDirectionsApi(from, to)) ||
+      (await routeViaOsrm(from, to));
+
     if (!route) {
       return res.status(502).json({ success: false, error: 'Routing failed' });
     }
