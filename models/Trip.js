@@ -32,10 +32,10 @@ const tripSchema = new mongoose.Schema({
   destination: { type: placeSchema, required: true },
 
   // Cached OSRM road geometry as an array of [lat, lng] points, so the map draws
-  // the route instantly and the public page doesn't hammer the routing service.
+  // instantly and the public page doesn't hammer the routing service.
   // Optional: a trip is still valid if routing was unavailable at creation.
   routePolyline: {
-    type: [[Number]],
+    type: Array,
     default: undefined
   },
   distanceKm: Number,      // route distance, from OSRM
