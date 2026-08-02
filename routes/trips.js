@@ -276,6 +276,71 @@ router.get('/:id/trail', protect, async (req, res) => {
       console.error('[trips] stop detection failed:', err.message);
     }
 
+    // Time the trip was running but the device reported nothing at all. This is
+    // not a stop — we genuinely do not know what the vehicle was doing — but
+    // leaving it out entirely is worse than saying so: a trip whose tracker died
+    // an hour in otherwise renders as a confident short journey, and its
+    // distance and duration silently understate the real trip. Reported
+    // separately from `stops` so the UI never presents a guess as an observation.
+    const coverage = (() => {
+      if (!usable.length) {
+        const endMs = trip.completedAt ? new Date(trip.completedAt) : new Date();
+        return {
+          untrackedMs: Math.max(0, endMs - new Date(trip.startedAt)),
+          gaps: [],
+          lastFixAt: null,
+        };
+      }
+
+      const startMs = new Date(trip.startedAt).getTime();
+      const endMs = trip.completedAt ? new Date(trip.completedAt).getTime() : Date.now();
+      const firstFixMs = new Date(usable[0].fixTime).getTime();
+      const lastFixMs = new Date(usable[usable.length - 1].fixTime).getTime();
+
+      // Only silences long enough to matter. Below this a gap is ordinary
+      // reporting jitter, and listing it would bury the real blind spots.
+      const MIN_UNTRACKED_MS = 5 * 60 * 1000;
+      const gaps = [];
+
+      // Silence before the first fix and after the last: the tracker was off or
+      // out of contact for the head or tail of the trip. The tail is the common
+      // one — a unit on switched power stops reporting the moment the engine is
+      // cut, so the vehicle's whole stay at the destination goes unrecorded.
+      if (firstFixMs - startMs >= MIN_UNTRACKED_MS) {
+        gaps.push({
+          startedAt: new Date(startMs),
+          endedAt: usable[0].fixTime,
+          durationMs: firstFixMs - startMs,
+          lat: usable[0].latitude,
+          lng: usable[0].longitude,
+          position: 'start',
+        });
+      }
+      if (endMs - lastFixMs >= MIN_UNTRACKED_MS) {
+        gaps.push({
+          startedAt: usable[usable.length - 1].fixTime,
+          endedAt: new Date(endMs),
+          durationMs: endMs - lastFixMs,
+          lat: usable[usable.length - 1].latitude,
+          lng: usable[usable.length - 1].longitude,
+          position: 'end',
+        });
+      }
+
+      const untrackedMs = gaps.reduce((sum, g) => sum + g.durationMs, 0);
+      return { untrackedMs, gaps, lastFixAt: usable[usable.length - 1].fixTime };
+    })();
+
+    // Name the blind spots by their last known position, same as stops, so the
+    // list can say where contact was lost rather than just when.
+    try {
+      if (coverage.gaps.length) {
+        coverage.gaps = await describePoints(coverage.gaps);
+      }
+    } catch (err) {
+      console.error('[trips] coverage geocode failed:', err.message);
+    }
+
     // Why a trip shows no stops is otherwise invisible from the client: too few
     // fixes, a tracker that reports road speed while parked, and a genuinely
     // non-stop drive all look identical once the list comes back empty.
@@ -297,6 +362,7 @@ router.get('/:id/trail', protect, async (req, res) => {
       success: true,
       trail,
       stops,
+      coverage,
       diagnostics,
       startedAt: usable[0]?.fixTime || null,
       endedAt: usable[usable.length - 1]?.fixTime || null,
