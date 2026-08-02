@@ -10,20 +10,29 @@
 // drawn from, so the two can never disagree about where the vehicle was.
 
 // A vehicle is "still" while its fixes stay inside this radius of where the run
-// began. It has to clear consumer-GPS jitter, which wanders a parked vehicle by
-// tens of metres, without swallowing genuine crawling in traffic. 60 m does
-// that: wider than the jitter, narrower than a city block.
-const STILL_RADIUS_M = 60;
+// began. It has to clear GPS jitter, which wanders a parked vehicle by tens of
+// metres, without swallowing genuine crawling in traffic.
+//
+// 100 m rather than a tighter figure because the units here run a ~75 m distance
+// filter — they transmit once the vehicle has moved that far, so consecutive
+// fixes from a standing vehicle routinely sit 75-80 m apart. A 60 m radius fell
+// just under that and split every stationary run into unusable fragments.
+const STILL_RADIUS_M = 100;
 
 // Below this the tracker is reporting a stationary vehicle, whatever the noise
 // in successive coordinates says. Kept above zero because GPS rarely reports a
 // clean 0 km/h — it hovers in the low single digits while parked.
 const STILL_SPEED_KMH = 3;
 
-// A run has to last this long to be worth a dispatcher's attention. Under two
-// minutes is a traffic light or a junction, and marking those would bury the
+// A stop has to last this long to be worth a dispatcher's attention. Much below
+// a minute is a traffic light or a junction, and marking those would bury the
 // real stops under dozens of pins.
-const MIN_STOP_MS = 2 * 60 * 1000;
+//
+// Held at one minute rather than lower because gap-derived stops have their
+// drive-out time deducted before this test, which trims a minute or so off each
+// one — a higher floor was rejecting genuine one-to-two minute halts after that
+// deduction rather than because they were too short to matter.
+const MIN_STOP_MS = 60 * 1000;
 
 // Many trackers transmit only when the vehicle has moved, to ration data. On
 // those, a long halt records NO stationary fixes at all — it appears purely as a
@@ -31,13 +40,18 @@ const MIN_STOP_MS = 2 * 60 * 1000;
 // clustered fixes would miss every stop such a device ever makes, so a silent
 // gap this long between consecutive fixes is itself treated as a stop.
 //
-// Sized for the Teltonika FMB920 in this fleet. Its stock profile sends on a
-// 3-5 minute heartbeat while parked and far more often while driving, so any
-// silence past ~4 minutes is already outside normal reporting. Kept above
-// MIN_STOP_MS because a gap is weaker evidence than a cluster — it can also mean
-// lost signal — but low enough to catch the shorter halts (a delivery, a
-// checkpost) that a 10-minute floor would swallow.
-const MIN_GAP_STOP_MS = 4 * 60 * 1000;
+// Sized against the FMB920s in this fleet, which report roughly every 10-15
+// seconds while driving. Against that cadence a full minute of silence is
+// already dozens of skipped reports, so it is well outside normal behaviour —
+// and in practice these one-to-three minute gaps are exactly the deliveries and
+// checkpost halts that operators care about. A higher floor (the 4 and 10
+// minute values tried earlier) silently swallowed all of them.
+//
+// This is safe to keep low only because MAX_GAP_IMPLIED_KMH below independently
+// checks that the vehicle did not actually travel during the silence: a brief
+// gap taken mid-drive implies road speed and is rejected on that basis, not on
+// its duration.
+const MIN_GAP_STOP_MS = 60 * 1000;
 
 // Whether a silence means "parked" cannot be judged by how far apart its two
 // fixes are. A distance-filtered unit stays quiet while parked and only
@@ -165,6 +179,11 @@ export const detectStops = (fixes = []) => {
               // Tells the UI this stop is bounded by a reporting gap rather
               // than observed throughout, so it can be labelled honestly.
               inferred: true,
+              // When the vehicle was actually next seen. `endedAt` above is
+              // pulled earlier by the drive-out deduction, so merging against
+              // it would treat two visits either side of a long drive as
+              // adjacent. Merging needs the real moment contact resumed.
+              seenAgainAt: fix.fixTime,
             });
           }
           continue;
@@ -209,7 +228,52 @@ export const detectStops = (fixes = []) => {
   }
 
   flush();
-  return stops;
+  return mergeAdjacent(stops);
+};
+
+// One halt can surface as several stops in a row: a unit with a distance filter
+// re-reports every ~75 m, so a vehicle inching forward in a queue or shuffling
+// within a yard produces a string of short gaps a hundred metres apart rather
+// than one continuous run. Presented raw that reads as three separate visits to
+// the same street, and it splits one long wait into fragments that each look
+// trivial.
+//
+// Two stops are the same halt when they are close in space AND effectively
+// continuous in time. Both must hold: nearby stops hours apart are genuinely
+// separate visits, and consecutive stops far apart are a real drive between two
+// waits.
+const MERGE_RADIUS_M = 150;
+const MERGE_GAP_MS = 5 * 60 * 1000;
+
+const mergeAdjacent = (stops) => {
+  if (stops.length < 2) return stops;
+
+  const merged = [stops[0]];
+  for (let i = 1; i < stops.length; i++) {
+    const cur = stops[i];
+    const last = merged[merged.length - 1];
+    const apart = distanceMeters(last.lat, last.lng, cur.lat, cur.lng);
+    // Measured from when the vehicle was genuinely seen again, not from the
+    // deduction-adjusted `endedAt` — otherwise a long drive between two visits
+    // to the same yard collapses into a single stop.
+    const lastSeen = last.seenAgainAt || last.endedAt;
+    const between = new Date(cur.startedAt) - new Date(lastSeen);
+
+    if (apart <= MERGE_RADIUS_M && between <= MERGE_GAP_MS) {
+      // Span the pair end to end. The time between them was spent creeping
+      // around the same spot, so it belongs to the halt rather than falling
+      // through the cracks between two reported stops.
+      last.endedAt = cur.endedAt;
+      last.durationMs = new Date(cur.endedAt) - new Date(last.startedAt);
+      last.fixCount += cur.fixCount;
+      last.seenAgainAt = cur.seenAgainAt || cur.endedAt;
+      // Stays inferred only if neither part was directly observed.
+      last.inferred = last.inferred && cur.inferred;
+    } else {
+      merged.push(cur);
+    }
+  }
+  return merged;
 };
 
 export const STOP_TUNING = {
