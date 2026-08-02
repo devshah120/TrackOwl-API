@@ -234,6 +234,12 @@ router.get('/:id/trail', protect, async (req, res) => {
     // hasn't locked yet reports [0, 0], and a single such point stretches the
     // trail from the real route out into the Atlantic — which also drags the
     // map's auto-framing out with it.
+    // No `.limit()` here: a limit takes the FIRST n fixes, which on a long trip
+    // silently ends the trail partway through the journey — a 5-hour trip from
+    // a 5-second tracker would be cut off before its third hour, hiding both
+    // the rest of the route and every stop in it. Stops are what explain a long
+    // trip, so they must be detected over the whole journey. The response is
+    // thinned for drawing further down instead.
     const fixes = await Position.find({
       device: trip.device,
       fixTime: window,
@@ -242,14 +248,21 @@ router.get('/:id/trail', protect, async (req, res) => {
       longitude: { $ne: 0 },
     })
       .sort({ fixTime: 1 })
-      .limit(MAX_TRAIL_POINTS)
       .select('latitude longitude accuracy speed fixTime -_id')
       .lean();
 
     // Same filtered fixes feed both outputs, so a point drawn on the trail and
     // a point counted towards a stop can never disagree.
     const usable = fixes.filter(isPlausibleFix);
-    const trail = usable.map((p) => [p.latitude, p.longitude]);
+
+    // Thin the drawn line to keep the response small, taking every nth fix so
+    // the shape spans the whole trip rather than stopping partway. Stops are
+    // detected from the full set below, never from this thinned copy — dropping
+    // fixes inside a stop would shorten the very durations we are reporting.
+    const stride = Math.ceil(usable.length / MAX_TRAIL_POINTS) || 1;
+    const trail = usable
+      .filter((_, i) => i % stride === 0 || i === usable.length - 1)
+      .map((p) => [p.latitude, p.longitude]);
 
     // Where the vehicle stood still, and for how long — the reason a planned
     // 11-minute run can take five hours. Addresses are resolved server-side so
@@ -263,10 +276,28 @@ router.get('/:id/trail', protect, async (req, res) => {
       console.error('[trips] stop detection failed:', err.message);
     }
 
+    // Why a trip shows no stops is otherwise invisible from the client: too few
+    // fixes, a tracker that reports road speed while parked, and a genuinely
+    // non-stop drive all look identical once the list comes back empty.
+    const speeds = usable.map((p) => p.speed).filter((s) => Number.isFinite(s));
+    const diagnostics = {
+      fixCount: usable.length,
+      returnedPoints: trail.length,
+      medianGapSec: usable.length > 1
+        ? Math.round(
+            (new Date(usable[usable.length - 1].fixTime) - new Date(usable[0].fixTime)) /
+              1000 / (usable.length - 1)
+          )
+        : null,
+      slowFixCount: speeds.filter((s) => s <= 3).length,
+      hasSpeedField: speeds.length > 0,
+    };
+
     res.json({
       success: true,
       trail,
       stops,
+      diagnostics,
       startedAt: usable[0]?.fixTime || null,
       endedAt: usable[usable.length - 1]?.fixTime || null,
     });
