@@ -248,7 +248,7 @@ router.get('/:id/trail', protect, async (req, res) => {
       longitude: { $ne: 0 },
     })
       .sort({ fixTime: 1 })
-      .select('latitude longitude accuracy speed fixTime -_id')
+      .select('latitude longitude accuracy speed ignition fixTime -_id')
       .lean();
 
     // Same filtered fixes feed both outputs, so a point drawn on the trail and

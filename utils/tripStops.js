@@ -25,6 +25,27 @@ const STILL_SPEED_KMH = 3;
 // real stops under dozens of pins.
 const MIN_STOP_MS = 2 * 60 * 1000;
 
+// Many trackers transmit only when the vehicle has moved, to ration data. On
+// those, a long halt records NO stationary fixes at all — it appears purely as a
+// gap in time between two ordinary moving fixes. Detecting stops only from
+// clustered fixes would miss every stop such a device ever makes, so a silent
+// gap this long between consecutive fixes is itself treated as a stop.
+//
+// Sized for the Teltonika FMB920 in this fleet. Its stock profile sends on a
+// 3-5 minute heartbeat while parked and far more often while driving, so any
+// silence past ~4 minutes is already outside normal reporting. Kept above
+// MIN_STOP_MS because a gap is weaker evidence than a cluster — it can also mean
+// lost signal — but low enough to catch the shorter halts (a delivery, a
+// checkpost) that a 10-minute floor would swallow.
+const MIN_GAP_STOP_MS = 4 * 60 * 1000;
+
+// A gap only means "parked" if the vehicle was in the same place either side of
+// it. If it reappears far away it was driving through a coverage blackspot, not
+// standing still, and marking that as a stop would be plainly wrong. This is
+// generous compared with STILL_RADIUS_M because the two fixes bounding a gap are
+// independent readings taken far apart in time.
+const GAP_MOVE_TOLERANCE_M = 250;
+
 // Metres between two fixes (haversine).
 const distanceMeters = (aLat, aLng, bLat, bLng) => {
   const R = 6371000;
@@ -84,10 +105,51 @@ export const detectStops = (fixes = []) => {
     run = [];
   };
 
-  for (const fix of fixes) {
+  for (let i = 0; i < fixes.length; i++) {
+    const fix = fixes[i];
+
+    // A long silence between two fixes taken in roughly the same place is a
+    // stop that the tracker simply did not report from — the case a
+    // cluster-only detector is blind to. Checked before anything else so it is
+    // caught whatever the two fixes claim about speed: a distance-filtered unit
+    // often reports its last pre-halt fix at road speed and its first post-halt
+    // fix at road speed too, with hours of standing still in between.
+    const prev = i > 0 ? fixes[i - 1] : null;
+    if (prev) {
+      const gapMs = new Date(fix.fixTime) - new Date(prev.fixTime);
+      if (gapMs >= MIN_GAP_STOP_MS) {
+        const moved = distanceMeters(
+          prev.latitude, prev.longitude, fix.latitude, fix.longitude
+        );
+        if (moved <= GAP_MOVE_TOLERANCE_M) {
+          // Close any open cluster first so the two never double-count the
+          // same period, then record the silence itself as the stop.
+          flush();
+          stops.push({
+            lat: prev.latitude,
+            lng: prev.longitude,
+            startedAt: prev.fixTime,
+            endedAt: fix.fixTime,
+            durationMs: gapMs,
+            fixCount: 2,
+            // Tells the UI this stop is bounded by a reporting gap rather than
+            // observed throughout, so it can be labelled honestly.
+            inferred: true,
+          });
+          continue;
+        }
+      }
+    }
+
     // A fix reporting real road speed ends any run outright — no need to check
     // the radius, the vehicle is demonstrably moving.
-    const moving = Number.isFinite(fix.speed) && fix.speed > STILL_SPEED_KMH;
+    //
+    // Ignition overrides that: a hardwired unit like the FMB920 reports the
+    // engine state directly, and engine-off is proof of a stop no matter what
+    // speed the GPS chip claims. Trusting speed alone would drop real halts
+    // whenever a stationary vehicle's noisy fix reads a few km/h.
+    const engineOff = fix.ignition === false;
+    const moving = !engineOff && Number.isFinite(fix.speed) && fix.speed > STILL_SPEED_KMH;
     if (moving) {
       flush();
       continue;
@@ -119,4 +181,10 @@ export const detectStops = (fixes = []) => {
   return stops;
 };
 
-export const STOP_TUNING = { STILL_RADIUS_M, STILL_SPEED_KMH, MIN_STOP_MS };
+export const STOP_TUNING = {
+  STILL_RADIUS_M,
+  STILL_SPEED_KMH,
+  MIN_STOP_MS,
+  MIN_GAP_STOP_MS,
+  GAP_MOVE_TOLERANCE_M,
+};
