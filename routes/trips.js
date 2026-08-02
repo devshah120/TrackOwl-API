@@ -208,15 +208,21 @@ router.patch('/:id', protect, async (req, res) => {
 router.get('/:id/trail', protect, async (req, res) => {
   try {
     const trip = await Trip.findOne({ _id: req.params.id, ...ownedBy(req) })
-      .select('device createdAt startedAt completedAt status');
+      .select('device startedAt completedAt status');
     if (!trip) return res.status(404).json({ success: false, error: 'Trip not found' });
 
-    // The trail window starts at startedAt (when the user clicked "Start Trip"),
-    // or falls back to createdAt if startedAt is not set (e.g. legacy trips or
-    // trips created before explicit start). Ends at completedAt (when they clicked
-    // "End Trip") — or now if the trip is still running.
-    const startTime = trip.startedAt || trip.createdAt;
-    const window = { $gte: startTime };
+    // The trail window opens at startedAt — the moment the user clicked "Start
+    // Trip" — and nowhere else. A trip without it has not been started, so it
+    // has driven nothing yet, whatever its device is doing: the vehicle may be
+    // on another job or deadheading to the pickup, and none of that mileage
+    // belongs to this trip. Report an empty trail rather than guessing a start.
+    if (!trip.startedAt) {
+      return res.json({ success: true, trail: [], startedAt: null, endedAt: null });
+    }
+
+    // Ends at completedAt (when they clicked "End Trip") — or now if the trip
+    // is still running.
+    const window = { $gte: trip.startedAt };
     if (trip.status === 'completed' && trip.completedAt) window.$lte = trip.completedAt;
 
     // Oldest-first is the draw order. The cap protects the response on a long
