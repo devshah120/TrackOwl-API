@@ -15,6 +15,7 @@ import billingRoutes from './routes/billing.js';
 import notificationRoutes from './routes/notifications.js';
 import adminRoutes from './routes/admin.js';
 import geoRoutes from './routes/geo.js';
+import historyRoutes from './routes/history.js';
 
 dotenv.config();
 
@@ -62,6 +63,7 @@ app.use('/api/trucks', truckRoutes);
 app.use('/api/ledger', ledgerRoutes);
 app.use('/api/billing-trips', billingRoutes);
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/history', historyRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/geo', geoRoutes);
 
