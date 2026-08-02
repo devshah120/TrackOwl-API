@@ -39,12 +39,21 @@ const MIN_STOP_MS = 2 * 60 * 1000;
 // checkpost) that a 10-minute floor would swallow.
 const MIN_GAP_STOP_MS = 4 * 60 * 1000;
 
-// A gap only means "parked" if the vehicle was in the same place either side of
-// it. If it reappears far away it was driving through a coverage blackspot, not
-// standing still, and marking that as a stop would be plainly wrong. This is
-// generous compared with STILL_RADIUS_M because the two fixes bounding a gap are
-// independent readings taken far apart in time.
-const GAP_MOVE_TOLERANCE_M = 250;
+// Whether a silence means "parked" cannot be judged by how far apart its two
+// fixes are. A distance-filtered unit stays quiet while parked and only
+// transmits once the vehicle is moving again, so the fix ending a gap is
+// routinely hundreds of metres down the road — the vehicle really did sit still,
+// it just wasn't reporting while it did.
+//
+// What distinguishes a stop from driving through a coverage blackspot is the
+// speed the distance implies. Covering 800 m in two hours is a vehicle that
+// parked and left near the end; covering 60 km is a vehicle that drove the whole
+// time. Below this implied average the silence has to be mostly standing still,
+// since no journey averages walking pace over a sustained period.
+//
+// Deliberately low: an implied average this small cannot be produced by real
+// driving, so what it admits is overwhelmingly genuine halts.
+const MAX_GAP_IMPLIED_KMH = 5;
 
 // Metres between two fixes (haversine).
 const distanceMeters = (aLat, aLng, bLat, bLng) => {
@@ -121,21 +130,43 @@ export const detectStops = (fixes = []) => {
         const moved = distanceMeters(
           prev.latitude, prev.longitude, fix.latitude, fix.longitude
         );
-        if (moved <= GAP_MOVE_TOLERANCE_M) {
+        // Straight-line distance understates road distance, so this implied
+        // speed is a lower bound — which is the safe direction: it can only
+        // make a genuine drive look slower, never make a stop look like one.
+        const impliedKmh = (moved / 1000) / (gapMs / 3600000);
+
+        if (impliedKmh <= MAX_GAP_IMPLIED_KMH) {
           // Close any open cluster first so the two never double-count the
           // same period, then record the silence itself as the stop.
           flush();
-          stops.push({
-            lat: prev.latitude,
-            lng: prev.longitude,
-            startedAt: prev.fixTime,
-            endedAt: fix.fixTime,
-            durationMs: gapMs,
-            fixCount: 2,
-            // Tells the UI this stop is bounded by a reporting gap rather than
-            // observed throughout, so it can be labelled honestly.
-            inferred: true,
-          });
+
+          // The vehicle sat where it was last seen, not where it resurfaced —
+          // it was already driving again by the time the second fix arrived.
+          // Anchoring the pin to `prev` puts it at the place it actually
+          // waited, which is what the address in the list has to name.
+          //
+          // The time spent driving the `moved` distance is not standing-still
+          // time, so it is taken off the reported duration. Without this a
+          // 2-hour gap that included a 10-minute drive out would be billed as
+          // 2 hours parked. Road speed here is a conservative 25 km/h: a low
+          // estimate deducts less, keeping the stop duration on the honest side
+          // rather than inflating it.
+          const drivingMs = Math.min((moved / 1000) / 25 * 3600000, gapMs);
+          const stationaryMs = gapMs - drivingMs;
+
+          if (stationaryMs >= MIN_STOP_MS) {
+            stops.push({
+              lat: prev.latitude,
+              lng: prev.longitude,
+              startedAt: prev.fixTime,
+              endedAt: new Date(new Date(prev.fixTime).getTime() + stationaryMs),
+              durationMs: stationaryMs,
+              fixCount: 2,
+              // Tells the UI this stop is bounded by a reporting gap rather
+              // than observed throughout, so it can be labelled honestly.
+              inferred: true,
+            });
+          }
           continue;
         }
       }
@@ -186,5 +217,5 @@ export const STOP_TUNING = {
   STILL_SPEED_KMH,
   MIN_STOP_MS,
   MIN_GAP_STOP_MS,
-  GAP_MOVE_TOLERANCE_M,
+  MAX_GAP_IMPLIED_KMH,
 };
