@@ -5,6 +5,8 @@ import Position from '../models/Position.js';
 import TrackToken from '../models/TrackToken.js';
 import { protect } from '../middleware/auth.js';
 import { sendTripCreatedEmail, sendTripCompletedEmail } from '../services/emailService.js';
+import { detectStops } from '../utils/tripStops.js';
+import { describePoints } from '../services/placeLookup.js';
 
 const router = express.Router();
 
@@ -217,7 +219,7 @@ router.get('/:id/trail', protect, async (req, res) => {
     // on another job or deadheading to the pickup, and none of that mileage
     // belongs to this trip. Report an empty trail rather than guessing a start.
     if (!trip.startedAt) {
-      return res.json({ success: true, trail: [], startedAt: null, endedAt: null });
+      return res.json({ success: true, trail: [], stops: [], startedAt: null, endedAt: null });
     }
 
     // Ends at completedAt (when they clicked "End Trip") — or now if the trip
@@ -241,18 +243,32 @@ router.get('/:id/trail', protect, async (req, res) => {
     })
       .sort({ fixTime: 1 })
       .limit(MAX_TRAIL_POINTS)
-      .select('latitude longitude accuracy fixTime -_id')
+      .select('latitude longitude accuracy speed fixTime -_id')
       .lean();
 
-    const trail = fixes
-      .filter(isPlausibleFix)
-      .map((p) => [p.latitude, p.longitude]);
+    // Same filtered fixes feed both outputs, so a point drawn on the trail and
+    // a point counted towards a stop can never disagree.
+    const usable = fixes.filter(isPlausibleFix);
+    const trail = usable.map((p) => [p.latitude, p.longitude]);
+
+    // Where the vehicle stood still, and for how long — the reason a planned
+    // 11-minute run can take five hours. Addresses are resolved server-side so
+    // every client of this endpoint gets them without its own geocoding.
+    let stops = [];
+    try {
+      stops = await describePoints(detectStops(usable));
+    } catch (err) {
+      // A stop list is an enrichment; losing it must not cost the caller the
+      // trail, which is the endpoint's primary job.
+      console.error('[trips] stop detection failed:', err.message);
+    }
 
     res.json({
       success: true,
       trail,
-      startedAt: fixes[0]?.fixTime || null,
-      endedAt: fixes[fixes.length - 1]?.fixTime || null,
+      stops,
+      startedAt: usable[0]?.fixTime || null,
+      endedAt: usable[usable.length - 1]?.fixTime || null,
     });
   } catch (error) {
     console.error('[trips] trail lookup failed:', error.message);
