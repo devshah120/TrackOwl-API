@@ -4,6 +4,38 @@ import { protect } from '../middleware/auth.js';
 
 const router = express.Router();
 
+// The signature is stored as a data URI and later handed to PDFKit's image(),
+// which only understands PNG and JPEG. Anything else — an SVG carrying script,
+// a truncated payload, an oversized blob — is rejected here rather than at
+// document-generation time, where it would break the download instead.
+const MAX_SIGNATURE_BYTES = 400 * 1024;
+const SIGNATURE_DATA_URI = /^data:image\/(png|jpeg);base64,([A-Za-z0-9+/]+={0,2})$/;
+
+const parseSignatureDataUrl = (value) => {
+  const match = SIGNATURE_DATA_URI.exec(String(value || '').trim());
+  if (!match) {
+    return { error: 'Signature must be a PNG or JPEG image' };
+  }
+
+  const buffer = Buffer.from(match[2], 'base64');
+  if (!buffer.length) {
+    return { error: 'Signature image is empty or corrupt' };
+  }
+  if (buffer.length > MAX_SIGNATURE_BYTES) {
+    return { error: 'Signature image must be under 400KB' };
+  }
+
+  // Confirm the bytes match the declared type — the header is not something a
+  // caller can fake by relabelling the MIME prefix.
+  const isPng = buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  const isJpeg = buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[buffer.length - 2] === 0xff;
+  if (!(isPng || isJpeg)) {
+    return { error: 'Signature image is not a valid PNG or JPEG' };
+  }
+
+  return { dataUrl: `data:image/${match[1]};base64,${match[2]}` };
+};
+
 // Get user profile
 router.get('/profile', protect, async (req, res) => {
   try {
@@ -29,7 +61,7 @@ router.get('/profile', protect, async (req, res) => {
 // Update user profile
 router.put('/profile', protect, async (req, res) => {
   try {
-    const { name, mobile, company, fleet, address, city, gstNumber, panNumber, bankDetails } = req.body;
+    const { name, mobile, company, fleet, address, city, gstNumber, panNumber, bankDetails, signature } = req.body;
     const updates = {};
 
     if (name) updates.name = name.trim();
@@ -48,6 +80,23 @@ router.put('/profile', protect, async (req, res) => {
         ifscCode: String(bankDetails.ifscCode || '').trim(),
         branchName: String(bankDetails.branchName || '').trim()
       };
+    }
+
+    if (signature !== undefined) {
+      if (signature === null || signature.dataUrl === '') {
+        // Explicit removal — clears the mark but keeps the field present.
+        updates.signature = { dataUrl: '', signatoryName: '', updatedAt: new Date() };
+      } else if (typeof signature === 'object') {
+        const parsed = parseSignatureDataUrl(signature.dataUrl);
+        if (parsed.error) {
+          return res.status(400).json({ success: false, error: parsed.error });
+        }
+        updates.signature = {
+          dataUrl: parsed.dataUrl,
+          signatoryName: String(signature.signatoryName || '').trim(),
+          updatedAt: new Date()
+        };
+      }
     }
 
     const user = await User.findByIdAndUpdate(

@@ -80,6 +80,32 @@ export const tickBox = (doc, x, y, size, checked) => {
   }
 };
 
+// Stamps the saved signature mark into a signatory cell, scaled to fit and
+// centred horizontally above the caption. A profile with no signature simply
+// leaves the space blank for a wet signature, which is the pre-existing
+// behaviour — so this never has to be conditional at the call sites.
+export const signatureMark = (doc, user, x, y, w, h) => {
+  const dataUrl = user?.signature?.dataUrl;
+  if (!dataUrl) return false;
+
+  try {
+    const base64 = dataUrl.split(',')[1];
+    if (!base64) return false;
+    // `fit` preserves the aspect ratio inside the box; the cell keeps a little
+    // padding so the mark never touches the ruled border.
+    doc.image(Buffer.from(base64, 'base64'), x + 4, y + 2, {
+      fit: [Math.max(w - 8, 1), Math.max(h - 4, 1)],
+      align: 'center',
+      valign: 'bottom'
+    });
+    return true;
+  } catch {
+    // A corrupt image must not take the whole document down — the signatory
+    // area falls back to blank.
+    return false;
+  }
+};
+
 // Transporter header shared by every document, drawn from the user's profile
 // so each client's own company details appear.
 export const companyHeader = (doc, user, x, y, w, { title = '', subjectTo = '' } = {}) => {

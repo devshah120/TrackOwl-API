@@ -51,6 +51,19 @@ const userSchema = new mongoose.Schema({
     default: () => ({}),
     _id: false
   },
+  // Authorised signatory mark stamped onto generated LRs and invoices. Held as
+  // a data URI so it travels with the profile — the images are small enough
+  // (canvas strokes or a downscaled upload) that a separate file store would
+  // buy nothing.
+  signature: {
+    type: {
+      dataUrl: { type: String, default: '' },
+      signatoryName: { type: String, trim: true, default: '' },
+      updatedAt: { type: Date }
+    },
+    default: () => ({}),
+    _id: false
+  },
   role: {
     type: String,
     enum: ['superadmin', 'client'],

@@ -1,4 +1,4 @@
-﻿import { box, tickBox, companyHeader, INR, fmtDate, amountInWords } from './pdf.js';
+﻿import { box, tickBox, companyHeader, signatureMark, INR, fmtDate, amountInWords } from './pdf.js';
 
 // A4 at 72dpi is 595x842pt. An 18pt margin leaves a printable width of 559,
 // close to the proportions of the pre-printed LR book.
@@ -26,7 +26,7 @@ export const drawLorryReceipt = (doc, trip, user) => {
   doc.font('Helvetica').fontSize(7)
     .text('Subject to jurisdiction', M, y, { width: W - 6, align: 'right' });
 
-  y = companyHeader(doc, user, M, y, W, { title: 'TRANSPORT CONTRACTOR & COMMISSION AGENT' });
+  y = companyHeader(doc, user, M, y, W, { title: 'Lorry Receipt (LR)' });
 
   // LR number and date sit in their own boxes at the top-right, as on the form.
   const noW = 130;
@@ -157,6 +157,13 @@ export const drawLorryReceipt = (doc, trip, user) => {
   doc.lineWidth(0.7).rect(fx, y, freightW, legendH).stroke();
   doc.font('Helvetica').fontSize(7)
     .text(`For ${user.company || ''}`, fx + 4, y + 6, { width: freightW - 8, align: 'center' });
+  // Between the "For <company>" line and the caption, leaving both legible.
+  signatureMark(doc, user, fx, y + 16, freightW, legendH - 34);
+  const lrSignatory = user.signature?.signatoryName;
+  if (lrSignatory) {
+    doc.font('Helvetica').fontSize(6.5).fillColor('#000')
+      .text(lrSignatory, fx + 4, y + legendH - 22, { width: freightW - 8, align: 'center' });
+  }
   doc.font('Helvetica').fontSize(6.5).fillColor('#555')
     .text('Authorised Signatory', fx + 4, y + legendH - 14, { width: freightW - 8, align: 'center' });
   doc.fillColor('#000');
@@ -411,11 +418,20 @@ export const drawTaxInvoice = (doc, trip, user) => {
       .text(bankLines.join('\n'), M + 4, y + 45, { width: declW - 8 });
   }
 
-  doc.lineWidth(0.7).rect(M + declW, y, W - declW, footH).stroke();
+  const signW = W - declW;
+  doc.lineWidth(0.7).rect(M + declW, y, signW, footH).stroke();
   doc.font('Helvetica-Bold').fontSize(8)
-    .text(`for ${user.company || ''}`, M + declW + 5, y + 5, { width: W - declW - 10, align: 'right' });
+    .text(`for ${user.company || ''}`, M + declW + 5, y + 5, { width: signW - 10, align: 'right' });
+  // The block is right-aligned, so the mark occupies the right half of the cell
+  // to sit under the company line rather than floating in the middle.
+  signatureMark(doc, user, M + declW + signW / 2, y + 16, signW / 2, footH - 34);
+  const invSignatory = user.signature?.signatoryName;
+  if (invSignatory) {
+    doc.font('Helvetica').fontSize(7).fillColor('#000')
+      .text(invSignatory, M + declW + 5, y + footH - 23, { width: signW - 10, align: 'right' });
+  }
   doc.font('Helvetica').fontSize(7).fillColor('#333')
-    .text('Authorised Signatory', M + declW + 5, y + footH - 14, { width: W - declW - 10, align: 'right' });
+    .text('Authorised Signatory', M + declW + 5, y + footH - 14, { width: signW - 10, align: 'right' });
   doc.fillColor('#000');
   y += footH;
 
@@ -501,6 +517,11 @@ export const drawGoodsDeclaration = (doc, trip, user) => {
     const cxx = M + i * cw;
     const width = i === cols.length - 1 ? W - cw * i : cw;
     doc.lineWidth(0.7).rect(cxx, y, width, signH).stroke();
+    // Only the transporter's own column is pre-signed; the consignor and driver
+    // still sign these by hand at pickup.
+    if (i === cols.length - 1) {
+      signatureMark(doc, user, cxx, y + 4, width, signH - 24);
+    }
     doc.font('Helvetica').fontSize(7.5).fillColor('#555')
       .text(label, cxx + 4, y + signH - 16, { width: width - 8, align: 'center' });
   });
