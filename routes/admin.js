@@ -1,11 +1,17 @@
 import express from 'express';
 import User from '../models/User.js';
 import Truck from '../models/Truck.js';
+import Driver from '../models/Driver.js';
 import Device from '../models/Device.js';
 import LedgerEntry from '../models/LedgerEntry.js';
 import Notification from '../models/Notification.js';
 import { protect, requireSuperAdmin } from '../middleware/auth.js';
 import { registerDevice } from '../services/deviceRegistration.js';
+import { readDriverList, syncTruckDrivers, attachDrivers } from '../utils/drivers.js';
+
+// Drivers are owned by the truck's client, not by the admin making the call.
+const rawDriverRows = (body) =>
+  Array.isArray(body?.drivers) ? body.drivers : body?.driver ? [body.driver] : [];
 
 const router = express.Router();
 
@@ -89,6 +95,7 @@ router.delete('/users/:id', async (req, res) => {
 
     await Promise.all([
       Truck.deleteMany({ owner: user._id }),
+      Driver.deleteMany({ owner: user._id }),
       Device.updateMany({ owner: user._id }, { $unset: { owner: '' } }),
       LedgerEntry.deleteMany({ owner: user._id }),
       Notification.deleteMany({ owner: user._id })
@@ -106,8 +113,9 @@ router.get('/trucks', async (req, res) => {
     const trucks = await Truck.find()
       .populate('owner', 'name company email')
       .sort({ createdAt: -1 });
-    res.json({ success: true, trucks });
+    res.json({ success: true, trucks: await attachDrivers(trucks) });
   } catch (error) {
+    console.error('[admin] list trucks failed:', error.message);
     res.status(500).json({ success: false, error: 'Failed to fetch trucks' });
   }
 });
@@ -115,7 +123,7 @@ router.get('/trucks', async (req, res) => {
 // POST /api/admin/trucks — superadmin creates a truck for a given client.
 router.post('/trucks', async (req, res) => {
   try {
-    const { owner, number, model, registrationDate, insuranceExpiry, status, currentRoute, driver } = req.body || {};
+    const { owner, number, model, registrationDate, insuranceExpiry, status, currentRoute } = req.body || {};
 
     if (!owner || !number || !model) {
       return res.status(400).json({ success: false, error: 'owner, truck number, and model are required' });
@@ -133,9 +141,19 @@ router.post('/trucks', async (req, res) => {
       registrationDate: registrationDate || undefined,
       insuranceExpiry: insuranceExpiry || undefined,
       status,
-      currentRoute: currentRoute ? String(currentRoute).trim() : undefined,
-      driver
+      currentRoute: currentRoute ? String(currentRoute).trim() : undefined
     });
+
+    try {
+      await syncTruckDrivers(truck._id, owner, readDriverList(req.body), rawDriverRows(req.body));
+    } catch (err) {
+      await Truck.deleteOne({ _id: truck._id });
+      await Driver.deleteMany({ truck: truck._id });
+      if (err.name === 'ValidationError') {
+        return res.status(400).json({ success: false, error: err.message });
+      }
+      throw err;
+    }
 
     Notification.create({
       owner,
@@ -145,7 +163,7 @@ router.post('/trucks', async (req, res) => {
       vehicle: truck.number
     }).catch((err) => console.error('[admin] notification failed:', err.message));
 
-    res.status(201).json({ success: true, truck });
+    res.status(201).json({ success: true, truck: await attachDrivers(truck) });
   } catch (error) {
     console.error('[admin] create truck failed:', error.message);
     res.status(500).json({ success: false, error: 'Failed to create truck' });
@@ -163,7 +181,6 @@ router.put('/trucks/:id', async (req, res) => {
     if (body.insuranceExpiry !== undefined) fields.insuranceExpiry = body.insuranceExpiry || undefined;
     if (body.status !== undefined) fields.status = body.status;
     if (body.currentRoute !== undefined) fields.currentRoute = String(body.currentRoute).trim();
-    if (body.driver !== undefined) fields.driver = body.driver;
 
     const truck = await Truck.findByIdAndUpdate(
       req.params.id,
@@ -172,8 +189,18 @@ router.put('/trucks/:id', async (req, res) => {
     ).populate('owner', 'name company email');
 
     if (!truck) return res.status(404).json({ success: false, error: 'Truck not found' });
-    res.json({ success: true, truck });
+
+    // Drivers belong to the truck's client — `owner` is populated here, so read
+    // the id off the populated document rather than the field itself.
+    const ownerId = truck.owner?._id || truck.owner;
+    await syncTruckDrivers(truck._id, ownerId, readDriverList(body), rawDriverRows(body));
+
+    res.json({ success: true, truck: await attachDrivers(truck) });
   } catch (error) {
+    if (error.name === 'ValidationError') {
+      return res.status(400).json({ success: false, error: error.message });
+    }
+    console.error('[admin] update truck failed:', error.message);
     res.status(500).json({ success: false, error: 'Failed to update truck' });
   }
 });
