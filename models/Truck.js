@@ -36,6 +36,17 @@ const truckSchema = new mongoose.Schema({
   currentRoute: { type: String, trim: true, default: '' },
   driver: legacyDriverSchema,
 
+  // The GPS unit fitted to this truck, if it has one. A truck carries at most
+  // one tracker, so the link lives here as a single ref rather than a list.
+  // Optional: plenty of trucks are managed on paperwork alone, and those simply
+  // never appear on the live map.
+  device: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Device',
+    default: null,
+    index: true
+  },
+
   createdAt: { type: Date, default: Date.now }
 });
 

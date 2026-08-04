@@ -31,7 +31,11 @@ const rawDriverRows = (body) =>
 // GET /api/trucks — the caller's trucks, newest first, each with its drivers.
 router.get('/', protect, async (req, res) => {
   try {
-    const trucks = await Truck.find(ownedBy(req)).sort({ createdAt: -1 });
+    // The fitted GPS unit comes back with the truck so callers can offer
+    // tracking without a second round-trip to /track/devices.
+    const trucks = await Truck.find(ownedBy(req))
+      .populate('device', 'name uniqueId lastPosition lastSeenAt')
+      .sort({ createdAt: -1 });
     res.json({ success: true, trucks: await attachDrivers(trucks, req.user._id) });
   } catch (error) {
     console.error('[trucks] list failed:', error.message);
