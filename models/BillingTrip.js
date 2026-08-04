@@ -30,6 +30,44 @@ const billingTripSchema = new mongoose.Schema({
   fromLocation: { type: String, trim: true, default: '' },
   toLocation: { type: String, trim: true, default: '' },
 
+  // Coordinates behind fromLocation/toLocation, captured when the trip is
+  // created from the map. The printed documents still use the plain strings
+  // above — these exist so the same trip can be drawn as a road route and
+  // matched against live GPS. Optional: a trip typed in by hand has no
+  // coordinates and simply won't appear on the Trip Routes map.
+  originPlace: {
+    type: {
+      name: { type: String, trim: true, default: '' },
+      lat: { type: Number },
+      lng: { type: Number }
+    },
+    default: undefined,
+    _id: false
+  },
+  destinationPlace: {
+    type: {
+      name: { type: String, trim: true, default: '' },
+      lat: { type: Number },
+      lng: { type: Number }
+    },
+    default: undefined,
+    _id: false
+  },
+
+  // The route/tracking record created alongside this billing trip, and the GPS
+  // device it follows. Set when the trip is created through the wizard with a
+  // vehicle that has a tracker; null for paperwork-only trips.
+  tripRoute: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Trip',
+    default: null
+  },
+  device: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Device',
+    default: null
+  },
+
   // Consignor = supplier (sends the goods), consignee = buyer (receives them).
   // partyName above stays the consignee for the trips table's "Party" column.
   consignor: {

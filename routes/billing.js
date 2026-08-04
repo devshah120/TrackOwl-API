@@ -25,6 +25,24 @@ const partyFields = (p = {}) => ({
   contact: str(p.contact)
 });
 
+// A { name, lat, lng } picked on the map. Returns null for anything that isn't
+// a usable coordinate, so a half-filled place can never be stored and later
+// drawn as a point in the sea. Mirrors cleanPlace() in routes/trips.js.
+const cleanPlace = (place) => {
+  if (!place || typeof place !== 'object') return null;
+  const name = str(place.name);
+  const lat = Number(place.lat);
+  const lng = Number(place.lng);
+  if (!name || !Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
+  return { name, lat, lng };
+};
+
+// An ObjectId reference sent by the client, or null to clear it. Anything
+// malformed is treated as "not provided" rather than throwing a cast error
+// that would fail the whole save.
+const objectId = (v) => (/^[a-f\d]{24}$/i.test(String(v ?? '')) ? String(v) : null);
+
 const buildBillingFields = (body) => {
   const fields = {};
   if (body.truck !== undefined) fields.truck = str(body.truck);
@@ -44,6 +62,17 @@ const buildBillingFields = (body) => {
 
   if (body.fromLocation !== undefined) fields.fromLocation = str(body.fromLocation);
   if (body.toLocation !== undefined) fields.toLocation = str(body.toLocation);
+
+  // Map-picked coordinates behind From/To. Sent as null by a caller that has
+  // cleared the pin, which unsets the field rather than leaving a stale point.
+  if (body.originPlace !== undefined) {
+    fields.originPlace = cleanPlace(body.originPlace) || undefined;
+  }
+  if (body.destinationPlace !== undefined) {
+    fields.destinationPlace = cleanPlace(body.destinationPlace) || undefined;
+  }
+  if (body.tripRoute !== undefined) fields.tripRoute = objectId(body.tripRoute);
+  if (body.device !== undefined) fields.device = objectId(body.device);
   if (body.invoiceNo !== undefined) fields.invoiceNo = str(body.invoiceNo);
   if (body.gstPayableBy !== undefined) fields.gstPayableBy = body.gstPayableBy;
   if (body.lrCharges !== undefined) fields.lrCharges = num(body.lrCharges);
