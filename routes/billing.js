@@ -47,6 +47,23 @@ const buildBillingFields = (body) => {
   if (body.invoiceNo !== undefined) fields.invoiceNo = str(body.invoiceNo);
   if (body.gstPayableBy !== undefined) fields.gstPayableBy = body.gstPayableBy;
   if (body.lrCharges !== undefined) fields.lrCharges = num(body.lrCharges);
+  if (body.gstRate !== undefined) fields.gstRate = num(body.gstRate);
+  if (body.references && typeof body.references === 'object') {
+    const r = body.references;
+    fields.references = {
+      deliveryNote: str(r.deliveryNote),
+      paymentTerms: str(r.paymentTerms),
+      supplierRef: str(r.supplierRef),
+      otherRef: str(r.otherRef),
+      buyerOrderNo: str(r.buyerOrderNo),
+      buyerOrderDate: str(r.buyerOrderDate),
+      despatchDocNo: str(r.despatchDocNo),
+      deliveryNoteDate: str(r.deliveryNoteDate),
+      despatchedThrough: str(r.despatchedThrough),
+      destination: str(r.destination),
+      termsOfDelivery: str(r.termsOfDelivery)
+    };
+  }
   if (body.loadingDate !== undefined) fields.loadingDate = body.loadingDate || undefined;
   if (body.deliveryDate !== undefined) fields.deliveryDate = body.deliveryDate || undefined;
 

@@ -1,20 +1,20 @@
-import { box, tickBox, companyHeader, INR, fmtDate, amountInWords } from './pdf.js';
+﻿import { box, tickBox, companyHeader, INR, fmtDate, amountInWords } from './pdf.js';
 
 // A4 at 72dpi is 595x842pt. An 18pt margin leaves a printable width of 559,
 // close to the proportions of the pre-printed LR book.
 const M = 18;
 const W = 595 - M * 2;
 
-// "40 Boxes" — the packaging count.
+// "40 Boxes" â€” the packaging count.
 const qtyOf = (trip) =>
   trip.goods?.quantity ? `${trip.goods.quantity} ${trip.goods.unit || ''}`.trim() : '';
 
-// "1250 Kg" — a mass, which carries its own unit rather than the packaging one.
+// "1250 Kg" â€” a mass, which carries its own unit rather than the packaging one.
 const weightOf = (trip) =>
   trip.goods?.weight ? `${trip.goods.weight} ${trip.goods.weightUnit || 'Kg'}`.trim() : '';
 
 // ---------------------------------------------------------------------------
-// Lorry Receipt — laid out to match the consignment note the office already
+// Lorry Receipt â€” laid out to match the consignment note the office already
 // uses: header, truck/from/consignee band, consignor band, then the goods
 // table with the GST block on the left and the freight totals column on the
 // right, and the copy-colour legend beneath.
@@ -79,7 +79,7 @@ export const drawLorryReceipt = (doc, trip, user) => {
   const gstBlockH = headH + bodyH;
   doc.lineWidth(0.7).rect(M, y, leftW, gstBlockH).stroke();
   doc.font('Helvetica-Bold').fontSize(8).text('GSTIN', M + 6, y + 6, { width: leftW - 12 });
-  doc.font('Helvetica').fontSize(8).text(user.gstNumber || '—', M + 6, y + 16, { width: leftW - 12 });
+  doc.font('Helvetica').fontSize(8).text(user.gstNumber || 'â€”', M + 6, y + 16, { width: leftW - 12 });
 
   doc.font('Helvetica').fontSize(7).text('GST TAX PAYABLE BY', M + 6, y + 34, { width: leftW - 12 });
   ['Consignor', 'Consignee', 'Transporter'].forEach((who, i) => {
@@ -168,7 +168,7 @@ export const drawLorryReceipt = (doc, trip, user) => {
   doc.font('Helvetica').fontSize(6.5).text(
     '(1) Issued subject to terms & conditions printed overleaf.  (2) Carriers are not responsible for leakage, ' +
     'breakage & damage.  (3) The company is not responsible for loss due to any natural calamities.  ' +
-    'AT OWNER\'S RISK — DOOR DELIVERY.',
+    'AT OWNER\'S RISK â€” DOOR DELIVERY.',
     M + 5, y + 6, { width: W - 10 }
   );
   y += termsH;
@@ -178,146 +178,256 @@ export const drawLorryReceipt = (doc, trip, user) => {
 };
 
 // ---------------------------------------------------------------------------
-// Tax Invoice — a GST-style freight bill for the same trip.
+// Tax Invoice â€” a GST-style freight bill for the same trip.
 // ---------------------------------------------------------------------------
 export const drawTaxInvoice = (doc, trip, user) => {
   const outerTop = M;
-  let y = M + 6;
 
-  y = companyHeader(doc, user, M, y, W, { title: 'TAX INVOICE' });
-  y = Math.max(y, outerTop + 62);
+  // Title sits above the frame, as on the reference form.
+  doc.font('Helvetica-Bold').fontSize(11).fillColor('#000')
+    .text('Tax Invoice', M, outerTop, { width: W, align: 'center' });
+  let y = outerTop + 18;
+  const frameTop = y;
 
-  const rowH = 24;
-  const third = W / 3;
-  box(doc, M, y, third, rowH, 'Invoice No.', trip.invoiceNo || trip.bill || trip.lr || '');
-  box(doc, M + third, y, third, rowH, 'Invoice Date', fmtDate(trip.date));
-  box(doc, M + third * 2, y, W - third * 2, rowH, 'Truck No.', trip.truck);
-  y += rowH;
+  // --- Seller / buyer column (left) beside the reference grid (right) -----
+  const leftW = Math.round(W * 0.5);
+  const rightW = W - leftW;
+  const refRowH = 26;
 
-  const half = W / 2;
-  const partyH = 62;
-  box(doc, M, y, half, partyH, 'Billed To (Consignee)',
-    [trip.consignee?.name || trip.partyName, trip.consignee?.address,
-      trip.consignee?.gst && `GSTIN: ${trip.consignee.gst}`,
-      trip.consignee?.contact && `Ph: ${trip.consignee.contact}`]
-      .filter(Boolean).join('\n'), { valueSize: 8 });
-  box(doc, M + half, y, W - half, partyH, 'Consignor',
-    [trip.consignor?.name, trip.consignor?.address,
-      trip.consignor?.gst && `GSTIN: ${trip.consignor.gst}`]
-      .filter(Boolean).join('\n'), { valueSize: 8 });
-  y += partyH;
-
-  box(doc, M, y, half, rowH, 'From', trip.fromLocation);
-  box(doc, M + half, y, W - half, rowH, 'To', trip.toLocation);
-  y += rowH;
-
-  // Line-item table.
-  const cols = [
-    ['#', 26],
-    ['Particulars', W - 26 - 70 - 70 - 100],
-    ['Qty', 70],
-    ['Rate', 70],
-    ['Amount', 100]
+  // Right grid: eleven reference boxes in two columns, the last spanning both.
+  const refPairs = [
+    ['Invoice No.', trip.invoiceNo || trip.bill || trip.lr || '', 'Dated', fmtDate(trip.date)],
+    ['Delivery Note', trip.references?.deliveryNote, 'Mode/Terms of Payment', trip.references?.paymentTerms || trip.payment?.method],
+    ["Supplier's Ref.", trip.references?.supplierRef, 'Other Reference(s)', trip.references?.otherRef],
+    ["Buyer's Order No.", trip.references?.buyerOrderNo, 'Dated', trip.references?.buyerOrderDate],
+    ['Despatch Document No.', trip.references?.despatchDocNo, 'Delivery Note Date', trip.references?.deliveryNoteDate],
+    ['Despatched through', trip.references?.despatchedThrough || trip.truck, 'Destination', trip.references?.destination || trip.toLocation]
   ];
-  const headY = y;
-  let cx = M;
-  cols.forEach(([label, w], i) => {
-    doc.lineWidth(0.7).rect(cx, headY, w, 20).stroke();
-    doc.font('Helvetica-Bold').fontSize(7.5)
-      .text(label, cx + 4, headY + 6, { width: w - 8, align: i >= 2 ? 'right' : 'left' });
-    cx += w;
+  const halfRight = rightW / 2;
+  refPairs.forEach(([l1, v1, l2, v2], i) => {
+    const ry = y + i * refRowH;
+    box(doc, M + leftW, ry, halfRight, refRowH, l1, v1, { valueSize: 8, labelSize: 5.5 });
+    box(doc, M + leftW + halfRight, ry, rightW - halfRight, refRowH, l2, v2, { valueSize: 8, labelSize: 5.5 });
   });
-  y += 20;
+  const termsY = y + refPairs.length * refRowH;
+  const termsH = 34;
+  box(doc, M + leftW, termsY, rightW, termsH, 'Terms of Delivery', trip.references?.termsOfDelivery,
+    { valueSize: 8, labelSize: 5.5 });
 
-  const itemH = 22;
-  const values = [
-    '1',
-    ['Freight charges', trip.goods?.description, trip.fromLocation && trip.toLocation
-      ? `${trip.fromLocation} to ${trip.toLocation}` : ''].filter(Boolean).join(' — '),
-    qtyOf(trip),
-    trip.goods?.freightRate ? INR(trip.goods.freightRate) : '',
-    INR(trip.amount)
-  ];
-  cx = M;
-  cols.forEach(([, w], i) => {
-    doc.lineWidth(0.7).rect(cx, y, w, itemH).stroke();
-    doc.font('Helvetica').fontSize(8)
-      .text(values[i], cx + 4, y + 7, { width: w - 8, align: i >= 2 ? 'right' : 'left', ellipsis: true });
-    cx += w;
-  });
-  y += itemH;
+  const rightBottom = termsY + termsH;
 
-  // Filler rows keep the table a consistent height regardless of item count.
-  const fillerH = 44;
-  doc.lineWidth(0.7).rect(M, y, W - 100, fillerH).stroke();
-  doc.lineWidth(0.7).rect(M + W - 100, y, 100, fillerH).stroke();
-  y += fillerH;
-
-  // Totals: LR charges then grand total.
-  const labelW = W - 100 - 120;
-  const rows = [
-    ['L.R. / Other Charges', INR(trip.lrCharges)],
-    ['Advance Received', INR(trip.payment?.advance)],
-    ['Balance Payable', INR(trip.payment?.balance)]
-  ];
-  rows.forEach(([label, val]) => {
-    doc.lineWidth(0.7).rect(M + labelW, y, 120, 18).stroke();
-    doc.lineWidth(0.7).rect(M + labelW + 120, y, 100, 18).stroke();
-    doc.font('Helvetica').fontSize(7.5).text(label, M + labelW + 4, y + 5, { width: 112 });
-    doc.font('Helvetica').fontSize(8.5)
-      .text(val, M + labelW + 124, y + 5, { width: 92, align: 'right' });
-    y += 18;
-  });
-
-  const grand = Number(trip.amount || 0) + Number(trip.lrCharges || 0);
-  doc.lineWidth(0.7).rect(M + labelW, y, 120, 22).stroke();
-  doc.lineWidth(0.7).rect(M + labelW + 120, y, 100, 22).stroke();
-  doc.font('Helvetica-Bold').fontSize(9).text('TOTAL', M + labelW + 4, y + 7, { width: 112 });
-  doc.font('Helvetica-Bold').fontSize(10)
-    .text(INR(grand), M + labelW + 124, y + 6, { width: 92, align: 'right' });
-
-  // Amount in words fills the space left of the totals stack.
-  const wordsTop = y - rows.length * 18;
-  doc.lineWidth(0.7).rect(M, wordsTop, labelW, rows.length * 18 + 22).stroke();
-  doc.font('Helvetica').fontSize(7).text('Amount in words', M + 5, wordsTop + 5, { width: labelW - 10 });
-  doc.font('Helvetica-Bold').fontSize(8.5)
-    .text(amountInWords(grand), M + 5, wordsTop + 16, { width: labelW - 10 });
-  y += 22;
-
-  // Payment status + bank details + signature.
-  const footH = 78;
-  const bankW = W - 170;
-  doc.lineWidth(0.7).rect(M, y, bankW, footH).stroke();
-  doc.font('Helvetica-Bold').fontSize(7.5).text('Bank Details', M + 5, y + 5, { width: bankW - 10 });
-  const b = user.bankDetails || {};
-  const bankLines = [
-    b.accountName && `A/c Name: ${b.accountName}`,
-    b.bankName && `Bank: ${b.bankName}`,
-    b.accountNumber && `A/c No: ${b.accountNumber}`,
-    b.ifscCode && `IFSC: ${b.ifscCode}`,
-    b.branchName && `Branch: ${b.branchName}`
+  // Left column: seller block on top, buyer block filling the rest.
+  const sellerH = Math.round((rightBottom - y) * 0.42);
+  doc.lineWidth(0.7).rect(M, y, leftW, sellerH).stroke();
+  doc.font('Helvetica-Bold').fontSize(9.5)
+    .text(user.company || '', M + 5, y + 5, { width: leftW - 10 });
+  const sellerLines = [
+    [user.address, user.city].filter(Boolean).join(', '),
+    user.gstNumber && `GSTIN : ${user.gstNumber}`,
+    user.panNumber && `PAN : ${user.panNumber}`,
+    user.mobile && `Ph : ${user.mobile}`
   ].filter(Boolean);
   doc.font('Helvetica').fontSize(7.5)
-    .text(bankLines.length ? bankLines.join('\n') : 'Not configured in Settings',
-      M + 5, y + 16, { width: bankW - 10 });
+    .text(sellerLines.join('\n'), M + 5, doc.y + 2, { width: leftW - 10 });
 
+  const buyerY = y + sellerH;
+  const buyerH = rightBottom - buyerY;
+  doc.lineWidth(0.7).rect(M, buyerY, leftW, buyerH).stroke();
+  doc.font('Helvetica').fontSize(6).fillColor('#333')
+    .text('BUYER', M + 5, buyerY + 4, { width: leftW - 10 });
+  doc.fillColor('#000').font('Helvetica-Bold').fontSize(9.5)
+    .text(trip.consignee?.name || trip.partyName || '', M + 5, buyerY + 13, { width: leftW - 10 });
+  const buyerLines = [
+    trip.consignee?.address,
+    trip.consignee?.gst && `GSTIN            : ${trip.consignee.gst}`,
+    trip.consignee?.contact && `Contact         : ${trip.consignee.contact}`,
+    trip.fromLocation && `Place of supply : ${trip.fromLocation}`
+  ].filter(Boolean);
   doc.font('Helvetica').fontSize(7.5)
-    .text(`Payment Status: ${trip.status}${trip.payment?.method ? '  |  Mode: ' + trip.payment.method : ''}`,
-      M + 5, y + footH - 14, { width: bankW - 10 });
+    .text(buyerLines.join('\n'), M + 5, doc.y + 2, { width: leftW - 10 });
 
-  doc.lineWidth(0.7).rect(M + bankW, y, 170, footH).stroke();
-  doc.font('Helvetica').fontSize(7.5)
-    .text(`For ${user.company || ''}`, M + bankW + 6, y + 8, { width: 158, align: 'center' });
-  doc.font('Helvetica').fontSize(7).fillColor('#555')
-    .text('Authorised Signatory', M + bankW + 6, y + footH - 16, { width: 158, align: 'center' });
+  y = rightBottom;
+
+  // --- Item table --------------------------------------------------------
+  // Column widths follow the reference: a wide description, then narrow
+  // numeric columns pinned to the right edge.
+  const cols = [
+    { key: 'sl', label: 'Sl\nNo.', w: 26, align: 'center' },
+    { key: 'desc', label: 'Description of Goods', w: 0, align: 'left' },
+    { key: 'qty', label: 'Quantity', w: 58, align: 'right' },
+    { key: 'rate', label: 'Rate', w: 56, align: 'right' },
+    { key: 'per', label: 'per', w: 34, align: 'center' },
+    { key: 'amount', label: 'Amount', w: 78, align: 'right' },
+    { key: 'gst', label: 'GST\n%', w: 34, align: 'center' }
+  ];
+  const fixed = cols.reduce((s, c) => s + c.w, 0);
+  cols.find((c) => c.key === 'desc').w = W - fixed;
+
+  const headH = 24;
+  let cx = M;
+  cols.forEach((c) => {
+    doc.lineWidth(0.7).rect(cx, y, c.w, headH).stroke();
+    doc.font('Helvetica-Bold').fontSize(7).fillColor('#000')
+      .text(c.label, cx + 2, y + 5, { width: c.w - 4, align: c.align === 'right' ? 'right' : c.align, lineGap: 1 });
+    c.x = cx;
+    cx += c.w;
+  });
+  y += headH;
+
+  // Tall body block, like the reference's open item area. The single freight
+  // line prints at the top; the VAT/GST line sits a few rows below it.
+  const bodyH = 150;
+  cols.forEach((c) => { doc.lineWidth(0.7).rect(c.x, y, c.w, bodyH).stroke(); });
+
+  const rate = Number(trip.goods?.freightRate || 0);
+  const gstRate = Number(trip.gstRate || 0);
+  const taxable = Number(trip.amount || 0) + Number(trip.lrCharges || 0);
+  const taxAmount = +(taxable * gstRate / 100).toFixed(2);
+
+  const cellText = (key, text, dy, opts = {}) => {
+    const c = cols.find((k) => k.key === key);
+    doc.font(opts.font || 'Helvetica').fontSize(opts.size || 8.5).fillColor('#000')
+      .text(text, c.x + 3, y + dy, { width: c.w - 6, align: opts.align || c.align, lineBreak: opts.wrap !== false });
+  };
+
+  cellText('sl', '1', 6);
+  const descParts = [
+    trip.goods?.description || 'Freight charges',
+    trip.fromLocation && trip.toLocation ? `${trip.fromLocation} to ${trip.toLocation}` : '',
+    trip.truck ? `Truck: ${trip.truck}` : '',
+    trip.lr ? `LR No.: ${trip.lr}` : ''
+  ].filter(Boolean);
+  cellText('desc', descParts.join('\n'), 6, { size: 8.5 });
+  cellText('qty', qtyOf(trip), 6);
+  cellText('rate', rate ? INR(rate) : '', 6);
+  cellText('per', trip.goods?.unit || '', 6);
+  cellText('amount', INR(taxable), 6, { font: 'Helvetica-Bold' });
+  cellText('gst', gstRate ? `${gstRate} %` : '', 6);
+
+  // GST line, indented and italicised the way the reference shows VAT.
+  if (gstRate) {
+    cellText('desc', 'GST', 52, { font: 'Helvetica-BoldOblique', size: 9, align: 'right' });
+    cellText('amount', INR(taxAmount), 52);
+  }
+
+  // Rounding/total strip at the foot of the item block.
+  const totalRowH = 20;
+  const totalY = y + bodyH;
+  const grand = taxable + taxAmount;
+  cols.forEach((c) => { doc.lineWidth(0.7).rect(c.x, totalY, c.w, totalRowH).stroke(); });
+  const totalLabel = cols.find((c) => c.key === 'desc');
+  doc.font('Helvetica-Bold').fontSize(8.5)
+    .text('Total', totalLabel.x + 3, totalY + 6, { width: totalLabel.w - 6, align: 'right' });
+  const qtyCol = cols.find((c) => c.key === 'qty');
+  doc.font('Helvetica-Bold').fontSize(8.5)
+    .text(qtyOf(trip), qtyCol.x + 3, totalY + 6, { width: qtyCol.w - 6, align: 'right' });
+  const amtCol = cols.find((c) => c.key === 'amount');
+  doc.font('Helvetica-Bold').fontSize(9)
+    .text(`Rs. ${INR(grand)}`, amtCol.x + 3, totalY + 6, { width: amtCol.w - 6, align: 'right' });
+  y = totalY + totalRowH;
+
+  // --- Amount in words + tax summary ------------------------------------
+  doc.font('Helvetica').fontSize(6.5).fillColor('#333')
+    .text('E. & O.E', M, y + 2, { width: W - 4, align: 'right' });
+  doc.fillColor('#000');
+  y += 11;
+
+  const wordsW = Math.round(W * 0.55);
+  const summaryW = W - wordsW;
+  const wordsH = 46;
+
+  doc.lineWidth(0.7).rect(M, y, wordsW, wordsH).stroke();
+  doc.font('Helvetica').fontSize(6.5).fillColor('#333')
+    .text('Amount Chargeable (in words)', M + 4, y + 4, { width: wordsW - 8 });
+  doc.fillColor('#000').font('Helvetica-Bold').fontSize(8)
+    .text(`${amountInWords(grand)}`, M + 4, y + 14, { width: wordsW - 8 });
+
+  // Tax summary: taxable value and tax amount by rate, then a totals row.
+  const sx = M + wordsW;
+  const sCols = [
+    { label: 'GST %', w: summaryW * 0.24, align: 'center' },
+    { label: 'Assessable Value', w: summaryW * 0.40, align: 'right' },
+    { label: 'Tax Amount', w: summaryW * 0.36, align: 'right' }
+  ];
+  const sHeadH = 14;
+  let scx = sx;
+  sCols.forEach((c) => {
+    doc.lineWidth(0.7).rect(scx, y, c.w, sHeadH).stroke();
+    doc.font('Helvetica').fontSize(6.5)
+      .text(c.label, scx + 2, y + 4, { width: c.w - 4, align: c.align });
+    c.x = scx;
+    scx += c.w;
+  });
+
+  const sRowH = 15;
+  const sRows = [
+    [gstRate ? `${gstRate} %` : '', INR(taxable), INR(taxAmount), false],
+    ['Total', INR(taxable), INR(taxAmount), true]
+  ];
+  sRows.forEach(([a, b, c, bold], i) => {
+    const ry = y + sHeadH + i * sRowH;
+    sCols.forEach((col) => { doc.lineWidth(0.7).rect(col.x, ry, col.w, sRowH).stroke(); });
+    const font = bold ? 'Helvetica-Bold' : 'Helvetica';
+    doc.font(bold ? 'Helvetica-BoldOblique' : font).fontSize(7.5)
+      .text(a, sCols[0].x + 2, ry + 4, { width: sCols[0].w - 4, align: bold ? 'right' : 'center' });
+    doc.font(font).fontSize(7.5)
+      .text(b, sCols[1].x + 2, ry + 4, { width: sCols[1].w - 4, align: 'right' });
+    doc.font(font).fontSize(7.5)
+      .text(c, sCols[2].x + 2, ry + 4, { width: sCols[2].w - 4, align: 'right' });
+  });
+  y += Math.max(wordsH, sHeadH + sRows.length * sRowH);
+
+  // Tax amount in words spans the full width, as on the reference.
+  const taxWordsH = 24;
+  doc.lineWidth(0.7).rect(M, y, W, taxWordsH).stroke();
+  doc.font('Helvetica').fontSize(6.5).fillColor('#333')
+    .text('Tax Amount (in words)', M + 4, y + 3, { width: W - 8 });
+  doc.fillColor('#000').font('Helvetica-Bold').fontSize(8)
+    .text(`${amountInWords(taxAmount)}`, M + 4, y + 12, { width: W - 8 });
+  y += taxWordsH;
+
+  // --- Declaration + bank + signature ------------------------------------
+  const footH = 84;
+  const declW = Math.round(W * 0.55);
+  doc.lineWidth(0.7).rect(M, y, declW, footH).stroke();
+  doc.font('Helvetica-Bold').fontSize(6.5).text('Declaration', M + 4, y + 4, { width: declW - 8 });
+  doc.font('Helvetica').fontSize(7).text(
+    'We declare that this invoice shows the actual price of the goods described and that all particulars are ' +
+    'true and correct.',
+    M + 4, y + 13, { width: declW - 8 }
+  );
+
+  const b = user.bankDetails || {};
+  const bankLines = [
+    b.bankName && `Bank : ${b.bankName}`,
+    b.accountNumber && `A/c No. : ${b.accountNumber}`,
+    b.ifscCode && `IFSC : ${b.ifscCode}`,
+    b.branchName && `Branch : ${b.branchName}`
+  ].filter(Boolean);
+  if (bankLines.length) {
+    doc.font('Helvetica-Bold').fontSize(6.5)
+      .text("Company's Bank Details", M + 4, y + 36, { width: declW - 8 });
+    doc.font('Helvetica').fontSize(7)
+      .text(bankLines.join('\n'), M + 4, y + 45, { width: declW - 8 });
+  }
+
+  doc.lineWidth(0.7).rect(M + declW, y, W - declW, footH).stroke();
+  doc.font('Helvetica-Bold').fontSize(8)
+    .text(`for ${user.company || ''}`, M + declW + 5, y + 5, { width: W - declW - 10, align: 'right' });
+  doc.font('Helvetica').fontSize(7).fillColor('#333')
+    .text('Authorised Signatory', M + declW + 5, y + footH - 14, { width: W - declW - 10, align: 'right' });
   doc.fillColor('#000');
   y += footH;
 
-  doc.lineWidth(1.2).rect(M, outerTop, W, y - outerTop).stroke();
+  doc.lineWidth(1.2).rect(M, frameTop, W, y - frameTop).stroke();
+
+  doc.font('Helvetica').fontSize(7).fillColor('#333')
+    .text('This is a Computer Generated Invoice', M, y + 6, { width: W, align: 'center' });
+  doc.fillColor('#000');
 };
 
 // ---------------------------------------------------------------------------
-// Goods Declaration — the consignor's statement of what is being carried.
+// Goods Declaration â€” the consignor's statement of what is being carried.
 // ---------------------------------------------------------------------------
 export const drawGoodsDeclaration = (doc, trip, user) => {
   const outerTop = M;
@@ -366,7 +476,7 @@ export const drawGoodsDeclaration = (doc, trip, user) => {
   y += rowH + 6;
 
   box(doc, M, y, half, rowH + 6, 'Driver',
-    [trip.driver?.name, trip.driver?.mobile].filter(Boolean).join(' — '));
+    [trip.driver?.name, trip.driver?.mobile].filter(Boolean).join(' â€” '));
   box(doc, M + half, y, W - half, rowH + 6, 'Driver Licence No.', trip.driver?.licenseNumber);
   y += rowH + 6;
 
@@ -399,3 +509,4 @@ export const drawGoodsDeclaration = (doc, trip, user) => {
 
   doc.lineWidth(1.2).rect(M, outerTop, W, y - outerTop).stroke();
 };
+

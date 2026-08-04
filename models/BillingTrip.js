@@ -79,6 +79,30 @@ const billingTripSchema = new mongoose.Schema({
   lrCharges: { type: Number, default: 0 },
   invoiceNo: { type: String, trim: true, default: '' },
 
+  // GST percentage applied to the freight on the tax invoice. Stored per trip
+  // because the rate can differ by consignment and by client.
+  gstRate: { type: Number, default: 0, min: 0, max: 100 },
+
+  // Reference boxes across the top of the tax invoice. Free text — they hold
+  // the counterparty's own document numbers, which follow no fixed format.
+  references: {
+    type: {
+      deliveryNote: { type: String, trim: true, default: '' },
+      paymentTerms: { type: String, trim: true, default: '' },
+      supplierRef: { type: String, trim: true, default: '' },
+      otherRef: { type: String, trim: true, default: '' },
+      buyerOrderNo: { type: String, trim: true, default: '' },
+      buyerOrderDate: { type: String, trim: true, default: '' },
+      despatchDocNo: { type: String, trim: true, default: '' },
+      deliveryNoteDate: { type: String, trim: true, default: '' },
+      despatchedThrough: { type: String, trim: true, default: '' },
+      destination: { type: String, trim: true, default: '' },
+      termsOfDelivery: { type: String, trim: true, default: '' }
+    },
+    default: () => ({}),
+    _id: false
+  },
+
   driver: {
     type: {
       name: { type: String, trim: true, default: '' },
