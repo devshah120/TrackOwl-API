@@ -2,17 +2,35 @@ import express from 'express';
 import BillingTrip from '../models/BillingTrip.js';
 import Notification from '../models/Notification.js';
 import { protect } from '../middleware/auth.js';
+import { streamPdf } from '../utils/pdf.js';
+import { drawLorryReceipt, drawTaxInvoice, drawGoodsDeclaration } from '../utils/documents.js';
 
 const router = express.Router();
 
 const ownedBy = (req) => ({ owner: req.user._id });
 
+const str = (v) => String(v ?? '').trim();
+const num = (v) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+};
+
+// Nested blocks are rebuilt wholesale rather than merged key-by-key, so a PUT
+// that omits a sub-field clears it — matching how the edit form submits the
+// whole party/goods block at once.
+const partyFields = (p = {}) => ({
+  name: str(p.name),
+  gst: str(p.gst),
+  address: str(p.address),
+  contact: str(p.contact)
+});
+
 const buildBillingFields = (body) => {
   const fields = {};
-  if (body.truck !== undefined) fields.truck = String(body.truck).trim();
-  if (body.lr !== undefined) fields.lr = String(body.lr).trim();
-  if (body.bill !== undefined) fields.bill = String(body.bill).trim();
-  if (body.partyName !== undefined) fields.partyName = String(body.partyName).trim();
+  if (body.truck !== undefined) fields.truck = str(body.truck);
+  if (body.lr !== undefined) fields.lr = str(body.lr);
+  if (body.bill !== undefined) fields.bill = str(body.bill);
+  if (body.partyName !== undefined) fields.partyName = str(body.partyName);
   if (body.status !== undefined) fields.status = body.status;
   if (body.amount !== undefined) fields.amount = Number(body.amount);
   if (body.date !== undefined) fields.date = body.date;
@@ -23,6 +41,48 @@ const buildBillingFields = (body) => {
       goods: Boolean(body.documents.goods)
     };
   }
+
+  if (body.fromLocation !== undefined) fields.fromLocation = str(body.fromLocation);
+  if (body.toLocation !== undefined) fields.toLocation = str(body.toLocation);
+  if (body.invoiceNo !== undefined) fields.invoiceNo = str(body.invoiceNo);
+  if (body.gstPayableBy !== undefined) fields.gstPayableBy = body.gstPayableBy;
+  if (body.lrCharges !== undefined) fields.lrCharges = num(body.lrCharges);
+  if (body.loadingDate !== undefined) fields.loadingDate = body.loadingDate || undefined;
+  if (body.deliveryDate !== undefined) fields.deliveryDate = body.deliveryDate || undefined;
+
+  if (body.consignor && typeof body.consignor === 'object') {
+    fields.consignor = partyFields(body.consignor);
+  }
+  if (body.consignee && typeof body.consignee === 'object') {
+    fields.consignee = partyFields(body.consignee);
+  }
+  if (body.goods && typeof body.goods === 'object') {
+    fields.goods = {
+      description: str(body.goods.description),
+      quantity: num(body.goods.quantity),
+      unit: str(body.goods.unit),
+      weight: num(body.goods.weight),
+      weightUnit: str(body.goods.weightUnit) || 'Kg',
+      declaredValue: num(body.goods.declaredValue),
+      freightRate: num(body.goods.freightRate)
+    };
+  }
+  if (body.driver && typeof body.driver === 'object') {
+    fields.driver = {
+      name: str(body.driver.name),
+      mobile: str(body.driver.mobile),
+      licenseNumber: str(body.driver.licenseNumber)
+    };
+  }
+  if (body.payment && typeof body.payment === 'object') {
+    fields.payment = {
+      method: str(body.payment.method),
+      advance: num(body.payment.advance),
+      balance: num(body.payment.balance),
+      notes: str(body.payment.notes)
+    };
+  }
+
   return fields;
 };
 
@@ -87,6 +147,39 @@ router.put('/:id', protect, async (req, res) => {
     res.json({ success: true, billingTrip });
   } catch (error) {
     res.status(500).json({ success: false, error: 'Failed to update billing trip' });
+  }
+});
+
+// GET /api/billing-trips/:id/documents/:kind.pdf — render one of the three
+// documents for a trip. Auth rides in the query string rather than a header
+// because the browser navigates to this URL directly to trigger the download.
+const DOCUMENTS = {
+  lr: { draw: drawLorryReceipt, prefix: 'Lorry-Receipt' },
+  invoice: { draw: drawTaxInvoice, prefix: 'Tax-Invoice' },
+  goods: { draw: drawGoodsDeclaration, prefix: 'Goods-Declaration' }
+};
+
+router.get('/:id/documents/:kind', protect, async (req, res) => {
+  const kind = String(req.params.kind).replace(/\.pdf$/, '');
+  const document = DOCUMENTS[kind];
+  if (!document) {
+    return res.status(404).json({ success: false, error: 'Unknown document type' });
+  }
+
+  try {
+    const trip = await BillingTrip.findOne({ _id: req.params.id, ...ownedBy(req) });
+    if (!trip) return res.status(404).json({ success: false, error: 'Billing trip not found' });
+
+    // Slashes in an LR number would break the Content-Disposition filename.
+    const ref = String(trip.lr || trip.bill || trip._id).replace(/[^\w.-]+/g, '-');
+    streamPdf(res, `${document.prefix}-${ref}.pdf`, (doc) => {
+      document.draw(doc, trip.toObject(), req.user);
+    });
+  } catch (error) {
+    console.error('[billing] document render failed:', error.message);
+    // A failure mid-stream cannot be turned into JSON — headers are already out.
+    if (res.headersSent) return res.end();
+    res.status(500).json({ success: false, error: 'Failed to generate document' });
   }
 });
 
