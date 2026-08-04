@@ -256,7 +256,16 @@ router.get('/public/:token', async (req, res) => {
       { $inc: { viewCount: 1 }, $set: { lastViewedAt: new Date() } }
     ).catch(() => {});
 
-    const trail = await Position.find({ device: record.device._id })
+    // Only the current driving session. Without a time bound this returned the
+    // last 50 fixes *ever* for the device, so positions from a previous day's
+    // trip were joined to today's by one straight line across the map.
+    const TRAIL_WINDOW_MINUTES = 120;
+    const since = new Date(Date.now() - TRAIL_WINDOW_MINUTES * 60 * 1000);
+
+    const trail = await Position.find({
+      device: record.device._id,
+      fixTime: { $gte: since }
+    })
       .sort({ fixTime: -1 })
       .limit(50)
       .select('latitude longitude speed course ignition fixTime -_id');

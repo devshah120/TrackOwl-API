@@ -63,6 +63,10 @@
     const token = location.pathname.split('/').filter(Boolean).pop();
     const app = document.getElementById('app');
     let map, marker, trail;
+    // A trail is a *sequence of segments*, not one line: a GPS jump (tunnel exit,
+    // cold fix, cell-tower fallback) must break the trail, not be drawn as a
+    // straight bar across the city. L.polyline accepts an array of arrays for this.
+    const MAX_HOP_KM = 3;
     let routeFetched = false; // fetch the trip route once, regardless of outcome
     let hasRoute = false;     // true only once a From→To route is actually on the map
 
@@ -98,6 +102,34 @@
         maxZoom: 19
       }).addTo(map);
       trail = L.polyline([], { color: '#2563eb', weight: 4, opacity: .55 }).addTo(map);
+    };
+
+    // Great-circle distance in km between two [lat,lng] pairs.
+    const hopKm = (a, b) => {
+      const R = 6371, toRad = (d) => d * Math.PI / 180;
+      const dLat = toRad(b[0] - a[0]), dLng = toRad(b[1] - a[1]);
+      const h = Math.sin(dLat / 2) ** 2 +
+                Math.cos(toRad(a[0])) * Math.cos(toRad(b[0])) * Math.sin(dLng / 2) ** 2;
+      return 2 * R * Math.asin(Math.sqrt(h));
+    };
+
+    // Split the raw fixes into continuous runs, cutting wherever consecutive
+    // points are too far apart to be real travel, and drop degenerate 1-point runs.
+    const trailSegments = (points) => {
+      const segs = [];
+      let cur = [];
+      for (const p of points) {
+        const ll = [p.latitude, p.longitude];
+        if (!Number.isFinite(ll[0]) || !Number.isFinite(ll[1])) continue;
+        if (ll[0] === 0 && ll[1] === 0) continue; // null-island fix, never a real position
+        if (cur.length && hopKm(cur[cur.length - 1], ll) > MAX_HOP_KM) {
+          if (cur.length > 1) segs.push(cur);
+          cur = [];
+        }
+        cur.push(ll);
+      }
+      if (cur.length > 1) segs.push(cur);
+      return segs;
     };
 
     const ago = (iso) => {
@@ -226,7 +258,7 @@
         marker.setLatLng(latlng);
         marker.setIcon(icon);
       }
-      trail.setLatLngs((points || []).map(p => [p.latitude, p.longitude]));
+      trail.setLatLngs(trailSegments(points || []));
     }
 
     refresh();
