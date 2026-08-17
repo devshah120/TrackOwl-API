@@ -30,6 +30,10 @@ const tripSchema = new mongoose.Schema({
   },
   origin: { type: placeSchema, required: true },
   destination: { type: placeSchema, required: true },
+  // Intermediate stops between origin and destination, in travel order. Each
+  // is a full place so the map can pin it and the route can be recalculated
+  // through it, not just a label.
+  stops: { type: [placeSchema], default: undefined },
 
   // Cached OSRM road geometry as an array of [lat, lng] points, so the map draws
   // instantly and the public page doesn't hammer the routing service.

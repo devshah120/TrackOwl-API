@@ -71,6 +71,12 @@ const buildBillingFields = (body) => {
   if (body.destinationPlace !== undefined) {
     fields.destinationPlace = cleanPlace(body.destinationPlace) || undefined;
   }
+  // Intermediate stops between originPlace and destinationPlace, in travel
+  // order. Same drop-bad-entries behaviour as cleanPlace above.
+  if (body.stops !== undefined) {
+    const cleaned = Array.isArray(body.stops) ? body.stops.map(cleanPlace).filter(Boolean) : [];
+    fields.stops = cleaned.length ? cleaned : undefined;
+  }
   if (body.tripRoute !== undefined) fields.tripRoute = objectId(body.tripRoute);
   if (body.device !== undefined) fields.device = objectId(body.device);
   if (body.invoiceNo !== undefined) fields.invoiceNo = str(body.invoiceNo);

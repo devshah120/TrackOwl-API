@@ -54,6 +54,19 @@ const billingTripSchema = new mongoose.Schema({
     _id: false
   },
 
+  // Intermediate stops between originPlace and destinationPlace, in travel
+  // order. Mirrors Trip.js's `stops` so the same route can be redrawn here.
+  stops: {
+    type: [
+      {
+        name: { type: String, trim: true, default: '' },
+        lat: { type: Number },
+        lng: { type: Number }
+      }
+    ],
+    default: undefined
+  },
+
   // The route/tracking record created alongside this billing trip, and the GPS
   // device it follows. Set when the trip is created through the wizard with a
   // vehicle that has a tracker; null for paperwork-only trips.

@@ -112,8 +112,9 @@ router.get('/reverse', protect, async (req, res) => {
 
 // Road route via the Routes API (the current product). Returns our
 // { polyline, distanceKm, durationMin } shape, or null if it is unavailable so
-// the caller can try the legacy endpoint.
-const routeViaRoutesApi = async (from, to) => {
+// the caller can try the legacy endpoint. `waypoints` is an optional array of
+// { lat, lng } intermediate stops, routed through in the order given.
+const routeViaRoutesApi = async (from, to, waypoints = []) => {
   const response = await fetch('https://routes.googleapis.com/directions/v2:computeRoutes', {
     method: 'POST',
     headers: {
@@ -126,6 +127,7 @@ const routeViaRoutesApi = async (from, to) => {
     body: JSON.stringify({
       origin: { location: { latLng: { latitude: from.lat, longitude: from.lng } } },
       destination: { location: { latLng: { latitude: to.lat, longitude: to.lng } } },
+      intermediates: waypoints.map((w) => ({ location: { latLng: { latitude: w.lat, longitude: w.lng } } })),
       travelMode: 'DRIVE',
       polylineQuality: 'HIGH_QUALITY',
     }),
@@ -151,15 +153,22 @@ const routeViaRoutesApi = async (from, to) => {
 
 // Same thing via the legacy Directions API, for projects that have Directions
 // enabled but not Routes.
-const routeViaDirectionsApi = async (from, to) => {
+const routeViaDirectionsApi = async (from, to, waypoints = []) => {
   const url = new URL('https://maps.googleapis.com/maps/api/directions/json');
-  url.search = new URLSearchParams({
+  const params = {
     origin: `${from.lat},${from.lng}`,
     destination: `${to.lat},${to.lng}`,
     mode: 'driving',
     region: REGION,
     key: KEY(),
-  }).toString();
+  };
+  // "via:" keeps Google from silently reordering stops for a shorter route —
+  // travel order was chosen deliberately on the Route step, so it must be
+  // driven in that order, not optimized away.
+  if (waypoints.length) {
+    params.waypoints = waypoints.map((w) => `via:${w.lat},${w.lng}`).join('|');
+  }
+  url.search = new URLSearchParams(params).toString();
 
   const data = await (await fetch(url)).json();
   if (isFailure(data.status)) {
@@ -188,9 +197,10 @@ const routeViaDirectionsApi = async (from, to) => {
 
 // Road route via OSRM (free Open Source Routing Machine fallback).
 // Used if Google Routes API and Directions API are disabled or fail.
-const routeViaOsrm = async (from, to) => {
+const routeViaOsrm = async (from, to, waypoints = []) => {
   try {
-    const url = `https://router.project-osrm.org/route/v1/driving/${from.lng},${from.lat};${to.lng},${to.lat}?overview=full&geometries=geojson`;
+    const points = [from, ...waypoints, to].map((p) => `${p.lng},${p.lat}`).join(';');
+    const url = `https://router.project-osrm.org/route/v1/driving/${points}?overview=full&geometries=geojson`;
     const response = await fetch(url);
     if (!response.ok) return null;
     const data = await response.json();
@@ -211,8 +221,9 @@ const routeViaOsrm = async (from, to) => {
   }
 };
 
-// GET /api/geo/route?fromLat=..&fromLng=..&toLat=..&toLng=..
-// Returns the road route polyline and travel estimates.
+// GET /api/geo/route?fromLat=..&fromLng=..&toLat=..&toLng=..&waypoints=lat,lng|lat,lng
+// Returns the road route polyline and travel estimates, routed through any
+// intermediate stops in the order given.
 // Tries Google Routes API -> Google Directions API -> OSRM fallback.
 router.get('/route', protect, async (req, res) => {
   if (!guardKey(res)) return;
@@ -222,11 +233,21 @@ router.get('/route', protect, async (req, res) => {
     return res.status(400).json({ success: false, error: 'from/to coordinates are required' });
   }
 
+  // "lat,lng|lat,lng" -> [{lat,lng}, ...], dropping any pair that doesn't parse
+  // so one malformed stop can't fail routing for the whole trip.
+  const waypoints = String(req.query.waypoints || '')
+    .split('|')
+    .map((pair) => {
+      const [lat, lng] = pair.split(',').map(Number);
+      return Number.isFinite(lat) && Number.isFinite(lng) ? { lat, lng } : null;
+    })
+    .filter(Boolean);
+
   try {
     const route =
-      (await routeViaOsrm(from, to)) ||
-      (await routeViaRoutesApi(from, to)) ||
-      (await routeViaDirectionsApi(from, to));
+      (await routeViaOsrm(from, to, waypoints)) ||
+      (await routeViaRoutesApi(from, to, waypoints)) ||
+      (await routeViaDirectionsApi(from, to, waypoints));
 
     if (!route) {
       return res.status(502).json({ success: false, error: 'Routing failed' });

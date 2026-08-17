@@ -46,6 +46,15 @@ const cleanPlace = (place) => {
   return { name, lat, lng };
 };
 
+// Validate an array of intermediate stops, in travel order. Silently drops any
+// entry that fails cleanPlace rather than rejecting the whole request — a bad
+// waypoint should not block saving an otherwise-good From/To.
+const cleanStops = (stops) => {
+  if (!Array.isArray(stops)) return undefined;
+  const cleaned = stops.map(cleanPlace).filter(Boolean);
+  return cleaned.length ? cleaned : undefined;
+};
+
 // ---------------------------------------------------------------------------
 // Authenticated: fleet owner manages trips
 // ---------------------------------------------------------------------------
@@ -107,11 +116,14 @@ router.post('/', protect, async (req, res) => {
       if (polyline.length === 0) polyline = undefined;
     }
 
+    const stops = cleanStops(req.body.stops);
+
     const trip = await Trip.create({
       device: device._id,
       owner: req.user._id,
       origin,
       destination,
+      stops,
       routePolyline: polyline,
       distanceKm: Number.isFinite(Number(distanceKm)) ? Number(distanceKm) : undefined,
       durationMin: Number.isFinite(Number(durationMin)) ? Number(durationMin) : undefined,
@@ -406,7 +418,7 @@ router.get('/public/:token', async (req, res) => {
     // Most relevant journey for this device: the active one, else the newest.
     const trip = await Trip.findOne({ device: record.device })
       .sort({ status: 1, createdAt: -1 }) // 'active' sorts before 'completed'/'planned'
-      .select('origin destination routePolyline distanceKm durationMin status');
+      .select('origin destination stops routePolyline distanceKm durationMin status');
 
     if (!trip) return res.json({ success: true, trip: null });
 
@@ -415,6 +427,7 @@ router.get('/public/:token', async (req, res) => {
       trip: {
         origin: trip.origin,
         destination: trip.destination,
+        stops: trip.stops || [],
         routePolyline: trip.routePolyline || null,
         distanceKm: trip.distanceKm ?? null,
         durationMin: trip.durationMin ?? null,
