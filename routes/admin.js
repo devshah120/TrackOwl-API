@@ -6,6 +6,7 @@ import Device from '../models/Device.js';
 import LedgerEntry from '../models/LedgerEntry.js';
 import Notification from '../models/Notification.js';
 import { protect, requireSuperAdmin } from '../middleware/auth.js';
+import { ROLES } from '../utils/permissions.js';
 import { registerDevice } from '../services/deviceRegistration.js';
 import { readDriverList, syncTruckDrivers, attachDrivers } from '../utils/drivers.js';
 
@@ -19,18 +20,27 @@ const router = express.Router();
 // gated to superadmin on top of normal auth.
 router.use(protect, requireSuperAdmin);
 
-// GET /api/admin/users — every client account, with a truck count each.
+// GET /api/admin/users — every client account, with a truck count and a count
+// of the staff seats on it. Only account owners are listed: their team shows as
+// a number here and is managed by the owner inside their own account.
 router.get('/users', async (req, res) => {
   try {
-    const users = await User.find({ role: 'client' }).sort({ createdAt: -1 });
-    const truckCounts = await Truck.aggregate([
-      { $group: { _id: '$owner', count: { $sum: 1 } } }
+    const users = await User.find({ role: ROLES.COMPANY_ADMIN }).sort({ createdAt: -1 });
+    const [truckCounts, seatCounts] = await Promise.all([
+      Truck.aggregate([{ $group: { _id: '$owner', count: { $sum: 1 } } }]),
+      User.aggregate([
+        { $match: { account: { $ne: null } } },
+        { $group: { _id: '$account', count: { $sum: 1 } } }
+      ])
     ]);
     const countByOwner = new Map(truckCounts.map((t) => [String(t._id), t.count]));
+    const seatsByOwner = new Map(seatCounts.map((s) => [String(s._id), s.count]));
 
     const withCounts = users.map((u) => ({
       ...u.toJSON(),
-      truckCount: countByOwner.get(String(u._id)) || 0
+      truckCount: countByOwner.get(String(u._id)) || 0,
+      // The owner's own seat plus everyone they have added.
+      userCount: (seatsByOwner.get(String(u._id)) || 0) + 1
     }));
 
     res.json({ success: true, users: withCounts });
@@ -48,7 +58,7 @@ router.patch('/users/:id/status', async (req, res) => {
     }
 
     const user = await User.findOneAndUpdate(
-      { _id: req.params.id, role: 'client' },
+      { _id: req.params.id, role: ROLES.COMPANY_ADMIN },
       { $set: { isActive } },
       { new: true }
     );
@@ -72,7 +82,7 @@ router.put('/users/:id', async (req, res) => {
     if (fleet !== undefined) updates.fleet = fleet;
 
     const user = await User.findOneAndUpdate(
-      { _id: req.params.id, role: 'client' },
+      { _id: req.params.id, role: ROLES.COMPANY_ADMIN },
       { $set: updates },
       { new: true, runValidators: true }
     );
@@ -90,10 +100,13 @@ router.put('/users/:id', async (req, res) => {
 // DELETE /api/admin/users/:id — remove a client account and everything they own.
 router.delete('/users/:id', async (req, res) => {
   try {
-    const user = await User.findOneAndDelete({ _id: req.params.id, role: 'client' });
+    const user = await User.findOneAndDelete({ _id: req.params.id, role: ROLES.COMPANY_ADMIN });
     if (!user) return res.status(404).json({ success: false, error: 'Client not found' });
 
     await Promise.all([
+      // The staff seats on this account: their logins die with the account, and
+      // the data they created was owned by the account anyway.
+      User.deleteMany({ account: user._id }),
       Truck.deleteMany({ owner: user._id }),
       Driver.deleteMany({ owner: user._id }),
       Device.updateMany({ owner: user._id }, { $unset: { owner: '' } }),
@@ -129,7 +142,7 @@ router.post('/trucks', async (req, res) => {
       return res.status(400).json({ success: false, error: 'owner, truck number, and model are required' });
     }
 
-    const ownerUser = await User.findOne({ _id: owner, role: 'client' });
+    const ownerUser = await User.findOne({ _id: owner, role: ROLES.COMPANY_ADMIN });
     if (!ownerUser) {
       return res.status(404).json({ success: false, error: 'Client not found' });
     }
@@ -226,7 +239,7 @@ router.post('/devices', async (req, res) => {
       return res.status(400).json({ success: false, error: 'owner (client id) is required' });
     }
 
-    const ownerUser = await User.findOne({ _id: owner, role: 'client' });
+    const ownerUser = await User.findOne({ _id: owner, role: ROLES.COMPANY_ADMIN });
     if (!ownerUser) {
       return res.status(404).json({ success: false, error: 'Client not found' });
     }
@@ -270,7 +283,7 @@ router.get('/devices', async (req, res) => {
 router.get('/stats', async (req, res) => {
   try {
     const [clientCount, trucks, devices, ledgerTotals] = await Promise.all([
-      User.countDocuments({ role: 'client' }),
+      User.countDocuments({ role: ROLES.COMPANY_ADMIN }),
       Truck.find().select('status'),
       Device.find().select('lastSeenAt lastPosition.speed'),
       LedgerEntry.aggregate([

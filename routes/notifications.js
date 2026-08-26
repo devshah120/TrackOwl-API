@@ -6,7 +6,7 @@ import { protect } from '../middleware/auth.js';
 
 const router = express.Router();
 
-const ownedBy = (req) => ({ owner: req.user._id });
+const ownedBy = (req) => ({ owner: req.accountId });
 
 // Upsert on dedupeKey so a recurring condition (still offline, still expiring)
 // is noticed once and then left alone — re-fetching the list must not spawn
@@ -24,7 +24,7 @@ const upsertNotification = (owner, doc) =>
 // notification list is fetched, which is often enough (the bell polls) without
 // needing a background job.
 const synthesizeNotifications = async (req) => {
-  const owner = req.user._id;
+  const owner = req.accountId;
   const now = Date.now();
   const day = 24 * 60 * 60 * 1000;
 

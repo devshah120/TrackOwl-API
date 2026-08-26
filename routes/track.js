@@ -2,7 +2,7 @@ import express from 'express';
 import Device from '../models/Device.js';
 import Position from '../models/Position.js';
 import TrackToken from '../models/TrackToken.js';
-import { protect } from '../middleware/auth.js';
+import { protect, requirePermission } from '../middleware/auth.js';
 import * as traccar from '../services/traccarAdmin.js';
 import { registerDevice } from '../services/deviceRegistration.js';
 
@@ -17,7 +17,7 @@ const MAX_TTL_MINUTES = 60 * 24 * 7; // a share link may not outlive one week
 // Devices arriving from Traccar have no owner until a user claims them, so every
 // device *mutation* (delete, share) stays scoped to the caller. Without this, one
 // customer could delete or mint a public share link for another customer's truck.
-const ownedBy = (req) => ({ owner: req.user._id });
+const ownedBy = (req) => ({ owner: req.accountId });
 
 // GET /api/track/devices — the caller's own devices plus any still-unclaimed ones.
 //
@@ -31,7 +31,7 @@ const ownedBy = (req) => ({ owner: req.user._id });
 // unclaimed device is visible-but-read-only until adopted. In a multi-tenant
 // deployment every account would see every unclaimed device here; that is the
 // deliberate trade for zero-touch adoption on a single-account install.
-router.get('/devices', protect, async (req, res) => {
+router.get('/devices', protect, requirePermission('tracking', 'read'), async (req, res) => {
   try {
     // Adopt every currently-unclaimed device to the caller, so it stops being an
     // orphan and becomes fully usable (shareable, deletable) — not just visible.
@@ -43,7 +43,7 @@ router.get('/devices', protect, async (req, res) => {
     // filters on owner, permanently invisible.
     await Device.updateMany(
       { $or: [{ owner: { $exists: false } }, { owner: null }] },
-      { $set: { owner: req.user._id } }
+      { $set: { owner: req.accountId } }
     );
 
     // `owner` is populated because the map's marker popup shows the owning
@@ -61,13 +61,13 @@ router.get('/devices', protect, async (req, res) => {
 // POST /api/track/devices — register a new vehicle in one step: create it in the
 // Traccar gateway (so the phone's packets are accepted) and claim it for the caller.
 // Returns the exact settings to type into the Traccar Client app.
-router.post('/devices', protect, async (req, res) => {
+router.post('/devices', protect, requirePermission('tracking', 'create'), async (req, res) => {
   try {
     const { device, setup } = await registerDevice({
       name: req.body.name,
       type: req.body.type,
       uniqueId: req.body.uniqueId,
-      ownerId: req.user._id
+      ownerId: req.accountId
     });
 
     res.status(201).json({
@@ -87,7 +87,7 @@ router.post('/devices', protect, async (req, res) => {
 
 // GET /api/track/devices/unclaimed — devices the gateway has seen that nobody owns
 // yet. This is how a user discovers the uniqueId of a phone they just switched on.
-router.get('/devices/unclaimed', protect, async (req, res) => {
+router.get('/devices/unclaimed', protect, requirePermission('tracking', 'read'), async (req, res) => {
   try {
     // Same null-vs-missing caveat as the adopt query in GET /devices.
     const devices = await Device.find({ $or: [{ owner: { $exists: false } }, { owner: null }] })
@@ -101,7 +101,7 @@ router.get('/devices/unclaimed', protect, async (req, res) => {
 
 // POST /api/track/devices/claim — take ownership of a device by its uniqueId.
 // Claiming is first-come-first-served: an already-owned device cannot be stolen.
-router.post('/devices/claim', protect, async (req, res) => {
+router.post('/devices/claim', protect, requirePermission('tracking', 'create'), async (req, res) => {
   try {
     const { uniqueId, name } = req.body;
     if (!uniqueId) {
@@ -116,11 +116,11 @@ router.post('/devices/claim', protect, async (req, res) => {
       });
     }
 
-    if (device.owner && !device.owner.equals(req.user._id)) {
+    if (device.owner && !device.owner.equals(req.accountId)) {
       return res.status(409).json({ success: false, error: 'That device is already claimed' });
     }
 
-    device.owner = req.user._id;
+    device.owner = req.accountId;
     if (name) device.name = String(name).trim();
     await device.save();
 
@@ -131,7 +131,7 @@ router.post('/devices/claim', protect, async (req, res) => {
 });
 
 // DELETE /api/track/devices/:id — remove one of the caller's devices everywhere.
-router.delete('/devices/:id', protect, async (req, res) => {
+router.delete('/devices/:id', protect, requirePermission('tracking', 'delete'), async (req, res) => {
   try {
     const device = await Device.findOneAndDelete({ _id: req.params.id, ...ownedBy(req) });
     if (!device) {
@@ -162,7 +162,7 @@ router.delete('/devices/:id', protect, async (req, res) => {
 });
 
 // POST /api/track/tokens — issue a short-lived public link for one device
-router.post('/tokens', protect, async (req, res) => {
+router.post('/tokens', protect, requirePermission('tracking', 'create'), async (req, res) => {
   try {
     const { deviceId, ttlMinutes = 60, label = '' } = req.body;
 
@@ -183,7 +183,7 @@ router.post('/tokens', protect, async (req, res) => {
 
     const { rawToken, doc } = await TrackToken.issue({
       device: device._id,
-      createdBy: req.user._id,
+      createdBy: req.accountId,
       ttlMinutes: ttl,
       label: String(label).trim()
     });
@@ -205,9 +205,9 @@ router.post('/tokens', protect, async (req, res) => {
 });
 
 // GET /api/track/tokens — list this user's links (hash only, never the token)
-router.get('/tokens', protect, async (req, res) => {
+router.get('/tokens', protect, requirePermission('tracking', 'read'), async (req, res) => {
   try {
-    const tokens = await TrackToken.find({ createdBy: req.user._id })
+    const tokens = await TrackToken.find({ createdBy: req.accountId })
       .populate('device', 'name uniqueId')
       .sort({ createdAt: -1 })
       .select('-tokenHash');
@@ -218,10 +218,10 @@ router.get('/tokens', protect, async (req, res) => {
 });
 
 // DELETE /api/track/tokens/:id — revoke a link before it expires
-router.delete('/tokens/:id', protect, async (req, res) => {
+router.delete('/tokens/:id', protect, requirePermission('tracking', 'delete'), async (req, res) => {
   try {
     const token = await TrackToken.findOneAndUpdate(
-      { _id: req.params.id, createdBy: req.user._id },
+      { _id: req.params.id, createdBy: req.accountId },
       { $set: { revokedAt: new Date() } },
       { new: true }
     );

@@ -6,6 +6,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import authRoutes from './routes/auth.js';
 import userRoutes from './routes/user.js';
+import usersRoutes from './routes/users.js';
 import traccarRoutes from './routes/traccar.js';
 import trackRoutes from './routes/track.js';
 import tripRoutes from './routes/trips.js';
@@ -58,6 +59,7 @@ mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/trackowl'
 // Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/user', userRoutes);
+app.use('/api/users', usersRoutes);
 app.use('/api/traccar', traccarRoutes);
 app.use('/api/track', trackRoutes);
 app.use('/api/trips', tripRoutes);

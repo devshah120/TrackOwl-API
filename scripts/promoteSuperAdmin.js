@@ -3,6 +3,7 @@
 import dotenv from 'dotenv';
 import mongoose from 'mongoose';
 import User from '../models/User.js';
+import { ROLES } from '../utils/permissions.js';
 
 dotenv.config();
 
@@ -17,7 +18,7 @@ const run = async () => {
 
   const user = await User.findOneAndUpdate(
     { email: email.toLowerCase() },
-    { $set: { role: 'superadmin' } },
+    { $set: { role: ROLES.SUPER_ADMIN, account: null } },
     { new: true }
   );
 

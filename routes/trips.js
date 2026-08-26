@@ -3,7 +3,7 @@ import Trip from '../models/Trip.js';
 import Device from '../models/Device.js';
 import Position from '../models/Position.js';
 import TrackToken from '../models/TrackToken.js';
-import { protect } from '../middleware/auth.js';
+import { protect, requirePermission } from '../middleware/auth.js';
 import { sendTripCreatedEmail, sendTripCompletedEmail } from '../services/emailService.js';
 import { detectStops } from '../utils/tripStops.js';
 import { describePoints } from '../services/placeLookup.js';
@@ -33,7 +33,7 @@ const isPlausibleFix = (p) => {
 
 // Every trip belongs to the caller; a trip is publicly shareable, so an unscoped
 // query would let one account see (and share) another account's journeys.
-const ownedBy = (req) => ({ owner: req.user._id });
+const ownedBy = (req) => ({ owner: req.accountId });
 
 // Validate a { name, lat, lng } place coming from the frontend's Places search.
 const cleanPlace = (place) => {
@@ -61,7 +61,7 @@ const cleanStops = (stops) => {
 
 // GET /api/trips — the caller's trips, newest first, with the device populated so
 // the list can show which vehicle each trip is for.
-router.get('/', protect, async (req, res) => {
+router.get('/', protect, requirePermission('trips', 'read'), async (req, res) => {
   try {
     const trips = await Trip.find(ownedBy(req))
       .populate('device', 'name uniqueId lastPosition lastSeenAt')
@@ -75,7 +75,7 @@ router.get('/', protect, async (req, res) => {
 // POST /api/trips — create a trip for one of the caller's devices.
 // The frontend resolves origin/destination to coordinates (Places search) and
 // the road route (OSRM) before calling this, so we just persist what it sends.
-router.post('/', protect, async (req, res) => {
+router.post('/', protect, requirePermission('trips', 'create'), async (req, res) => {
   try {
     const {
       deviceId,
@@ -120,7 +120,7 @@ router.post('/', protect, async (req, res) => {
 
     const trip = await Trip.create({
       device: device._id,
-      owner: req.user._id,
+      owner: req.accountId,
       origin,
       destination,
       stops,
@@ -148,7 +148,7 @@ router.post('/', protect, async (req, res) => {
 
 // PATCH /api/trips/:id — update mutable fields (status, note). Kept minimal:
 // origin/destination are fixed at creation since the cached route depends on them.
-router.patch('/:id', protect, async (req, res) => {
+router.patch('/:id', protect, requirePermission('trips', 'update'), async (req, res) => {
   try {
     const updates = {};
     if (req.body.status !== undefined) {
@@ -219,7 +219,7 @@ router.patch('/:id', protect, async (req, res) => {
 // window we'd draw every fix the device ever sent, including other journeys.
 //
 // Returns oldest-first [[lat, lng], ...] so the map can draw it as one line.
-router.get('/:id/trail', protect, async (req, res) => {
+router.get('/:id/trail', protect, requirePermission('trips', 'read'), async (req, res) => {
   try {
     const trip = await Trip.findOne({ _id: req.params.id, ...ownedBy(req) })
       .select('device startedAt completedAt status');
@@ -386,7 +386,7 @@ router.get('/:id/trail', protect, async (req, res) => {
 });
 
 // DELETE /api/trips/:id — remove one of the caller's trips.
-router.delete('/:id', protect, async (req, res) => {
+router.delete('/:id', protect, requirePermission('trips', 'delete'), async (req, res) => {
   try {
     const trip = await Trip.findOneAndDelete({ _id: req.params.id, ...ownedBy(req) });
     if (!trip) return res.status(404).json({ success: false, error: 'Trip not found' });

@@ -3,6 +3,7 @@ import jwt from 'jsonwebtoken';
 import User from '../models/User.js';
 import { validateEmail, validatePassword, validateMobile } from '../utils/validators.js';
 import { protect } from '../middleware/auth.js';
+import { ROLES } from '../utils/permissions.js';
 import { sendOTPEmail } from '../services/emailService.js';
 
 const router = express.Router();
@@ -72,7 +73,9 @@ router.post('/register', async (req, res) => {
       password,
       company: company.trim(),
       fleet,
-      role: 'client'
+      // Self-registration always creates an account owner. Staff seats are
+      // added from inside the account via POST /api/users, never here.
+      role: ROLES.COMPANY_ADMIN
     });
 
     const token = generateToken(user._id);
@@ -138,6 +141,22 @@ router.post('/login', async (req, res) => {
         error: 'Account is inactive'
       });
     }
+
+    // A staff seat is only as live as the account it hangs off — if the owner
+    // has been deactivated, nobody on that account gets in.
+    if (user.account) {
+      const owner = await User.findById(user.account).select('isActive');
+      if (!owner || !owner.isActive) {
+        return res.status(403).json({
+          success: false,
+          error: 'Account is inactive'
+        });
+      }
+    }
+
+    user.lastLoginAt = new Date();
+    // Skips validation and the password re-hash — this touches one timestamp.
+    await user.updateOne({ $set: { lastLoginAt: user.lastLoginAt } });
 
     const token = generateToken(user._id);
 

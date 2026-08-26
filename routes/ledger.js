@@ -2,11 +2,11 @@ import express from 'express';
 import LedgerEntry from '../models/LedgerEntry.js';
 import Truck from '../models/Truck.js';
 import Driver from '../models/Driver.js';
-import { protect } from '../middleware/auth.js';
+import { protect, requirePermission } from '../middleware/auth.js';
 
 const router = express.Router();
 
-const ownedBy = (req) => ({ owner: req.user._id });
+const ownedBy = (req) => ({ owner: req.accountId });
 
 // Receipts ride along in the JSON body as data URIs. Base64 inflates by ~4/3,
 // so this caps the stored string rather than the original file — roughly a 3 MB
@@ -78,7 +78,7 @@ const withLinks = (query) =>
 // Receipts are excluded here: a data URI per row would bloat the list response
 // well past what the table needs. The client fetches one via GET /:id/receipt
 // when the user actually opens it.
-router.get('/', protect, async (req, res) => {
+router.get('/', protect, requirePermission('ledger', 'read'), async (req, res) => {
   try {
     const entries = await withLinks(
       LedgerEntry.find(ownedBy(req)).select('-receipt.dataUrl').sort({ date: -1 })
@@ -91,7 +91,7 @@ router.get('/', protect, async (req, res) => {
 });
 
 // GET /api/ledger/:id/receipt — the stored receipt for one entry, as a data URI.
-router.get('/:id/receipt', protect, async (req, res) => {
+router.get('/:id/receipt', protect, requirePermission('ledger', 'read'), async (req, res) => {
   try {
     const entry = await LedgerEntry.findOne({ _id: req.params.id, ...ownedBy(req) }).select('receipt');
     if (!entry) return res.status(404).json({ success: false, error: 'Ledger entry not found' });
@@ -105,7 +105,7 @@ router.get('/:id/receipt', protect, async (req, res) => {
 });
 
 // POST /api/ledger — create an entry for the caller.
-router.post('/', protect, async (req, res) => {
+router.post('/', protect, requirePermission('ledger', 'create'), async (req, res) => {
   try {
     const fields = buildLedgerFields(req.body || {});
     if (!fields.date || !fields.type || !fields.category || !fields.paymentMethod || !Number.isFinite(fields.amount)) {
@@ -115,7 +115,7 @@ router.post('/', protect, async (req, res) => {
     const invalid = await validateLinks(req, fields);
     if (invalid) return res.status(400).json({ success: false, error: invalid });
 
-    const created = await LedgerEntry.create({ ...fields, owner: req.user._id });
+    const created = await LedgerEntry.create({ ...fields, owner: req.accountId });
     const entry = await withLinks(
       LedgerEntry.findById(created._id).select('-receipt.dataUrl')
     );
@@ -127,7 +127,7 @@ router.post('/', protect, async (req, res) => {
 });
 
 // PUT /api/ledger/:id — full update of one of the caller's entries.
-router.put('/:id', protect, async (req, res) => {
+router.put('/:id', protect, requirePermission('ledger', 'update'), async (req, res) => {
   try {
     const fields = buildLedgerFields(req.body || {});
 
@@ -150,7 +150,7 @@ router.put('/:id', protect, async (req, res) => {
 });
 
 // DELETE /api/ledger/:id — remove one of the caller's entries.
-router.delete('/:id', protect, async (req, res) => {
+router.delete('/:id', protect, requirePermission('ledger', 'delete'), async (req, res) => {
   try {
     const entry = await LedgerEntry.findOneAndDelete({ _id: req.params.id, ...ownedBy(req) });
     if (!entry) return res.status(404).json({ success: false, error: 'Ledger entry not found' });

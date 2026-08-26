@@ -2,12 +2,12 @@ import express from 'express';
 import Truck from '../models/Truck.js';
 import Driver from '../models/Driver.js';
 import Notification from '../models/Notification.js';
-import { protect } from '../middleware/auth.js';
+import { protect, requirePermission } from '../middleware/auth.js';
 import { readDriverList, syncTruckDrivers, attachDrivers } from '../utils/drivers.js';
 
 const router = express.Router();
 
-const ownedBy = (req) => ({ owner: req.user._id });
+const ownedBy = (req) => ({ owner: req.accountId });
 
 // Builds a Truck-shaped update object from the flat AddNewTruck form payload,
 // only including fields that were actually sent. Drivers are not part of this —
@@ -29,14 +29,14 @@ const rawDriverRows = (body) =>
   Array.isArray(body?.drivers) ? body.drivers : body?.driver ? [body.driver] : [];
 
 // GET /api/trucks — the caller's trucks, newest first, each with its drivers.
-router.get('/', protect, async (req, res) => {
+router.get('/', protect, requirePermission('trucks', 'read'), async (req, res) => {
   try {
     // The fitted GPS unit comes back with the truck so callers can offer
     // tracking without a second round-trip to /track/devices.
     const trucks = await Truck.find(ownedBy(req))
       .populate('device', 'name uniqueId lastPosition lastSeenAt')
       .sort({ createdAt: -1 });
-    res.json({ success: true, trucks: await attachDrivers(trucks, req.user._id) });
+    res.json({ success: true, trucks: await attachDrivers(trucks, req.accountId) });
   } catch (error) {
     console.error('[trucks] list failed:', error.message);
     res.status(500).json({ success: false, error: 'Failed to fetch trucks' });
@@ -44,7 +44,7 @@ router.get('/', protect, async (req, res) => {
 });
 
 // POST /api/trucks — create a truck and its drivers for the caller.
-router.post('/', protect, async (req, res) => {
+router.post('/', protect, requirePermission('trucks', 'create'), async (req, res) => {
   try {
     const body = req.body || {};
     const fields = buildTruckFields(body);
@@ -53,10 +53,10 @@ router.post('/', protect, async (req, res) => {
     }
 
     const drivers = readDriverList(body);
-    const truck = await Truck.create({ ...fields, owner: req.user._id });
+    const truck = await Truck.create({ ...fields, owner: req.accountId });
 
     try {
-      await syncTruckDrivers(truck._id, req.user._id, drivers, rawDriverRows(body));
+      await syncTruckDrivers(truck._id, req.accountId, drivers, rawDriverRows(body));
     } catch (err) {
       // A truck with no valid drivers is worse than no truck at all here — the
       // form submitted both together, so roll back rather than leave a stray.
@@ -68,11 +68,11 @@ router.post('/', protect, async (req, res) => {
       throw err;
     }
 
-    const saved = await attachDrivers(truck, req.user._id);
+    const saved = await attachDrivers(truck, req.accountId);
     const names = (saved.drivers || []).map((d) => d.name).filter(Boolean);
 
     Notification.create({
-      owner: req.user._id,
+      owner: req.accountId,
       type: 'event',
       title: 'Truck Added',
       message: `Truck ${truck.number} added to fleet${names.length ? ` with driver${names.length > 1 ? 's' : ''} ${names.join(', ')}` : ''}`,
@@ -87,7 +87,7 @@ router.post('/', protect, async (req, res) => {
 });
 
 // PUT /api/trucks/:id — full update of one of the caller's trucks, drivers included.
-router.put('/:id', protect, async (req, res) => {
+router.put('/:id', protect, requirePermission('trucks', 'update'), async (req, res) => {
   try {
     const body = req.body || {};
     const fields = buildTruckFields(body);
@@ -98,9 +98,9 @@ router.put('/:id', protect, async (req, res) => {
     );
     if (!truck) return res.status(404).json({ success: false, error: 'Truck not found' });
 
-    await syncTruckDrivers(truck._id, req.user._id, readDriverList(body), rawDriverRows(body));
+    await syncTruckDrivers(truck._id, req.accountId, readDriverList(body), rawDriverRows(body));
 
-    res.json({ success: true, truck: await attachDrivers(truck, req.user._id) });
+    res.json({ success: true, truck: await attachDrivers(truck, req.accountId) });
   } catch (error) {
     if (error.name === 'ValidationError') {
       return res.status(400).json({ success: false, error: error.message });
@@ -111,7 +111,7 @@ router.put('/:id', protect, async (req, res) => {
 });
 
 // DELETE /api/trucks/:id — remove one of the caller's trucks and its drivers.
-router.delete('/:id', protect, async (req, res) => {
+router.delete('/:id', protect, requirePermission('trucks', 'delete'), async (req, res) => {
   try {
     const truck = await Truck.findOneAndDelete({ _id: req.params.id, ...ownedBy(req) });
     if (!truck) return res.status(404).json({ success: false, error: 'Truck not found' });

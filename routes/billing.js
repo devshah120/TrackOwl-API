@@ -1,14 +1,14 @@
 import express from 'express';
 import BillingTrip from '../models/BillingTrip.js';
 import Notification from '../models/Notification.js';
-import { protect } from '../middleware/auth.js';
+import { protect, requirePermission } from '../middleware/auth.js';
 import { streamPdf } from '../utils/pdf.js';
 import { drawLorryReceipt, drawTaxInvoice, drawGoodsDeclaration } from '../utils/documents.js';
 import { profileForDocuments } from '../utils/company.js';
 
 const router = express.Router();
 
-const ownedBy = (req) => ({ owner: req.user._id });
+const ownedBy = (req) => ({ owner: req.accountId });
 
 const str = (v) => String(v ?? '').trim();
 const num = (v) => {
@@ -140,7 +140,7 @@ const buildBillingFields = (body) => {
 };
 
 // GET /api/billing-trips — the caller's billing trips, newest first.
-router.get('/', protect, async (req, res) => {
+router.get('/', protect, requirePermission('billing', 'read'), async (req, res) => {
   try {
     const billingTrips = await BillingTrip.find(ownedBy(req)).sort({ date: -1 });
     res.json({ success: true, billingTrips });
@@ -150,17 +150,17 @@ router.get('/', protect, async (req, res) => {
 });
 
 // POST /api/billing-trips — create a billing trip for the caller.
-router.post('/', protect, async (req, res) => {
+router.post('/', protect, requirePermission('billing', 'create'), async (req, res) => {
   try {
     const fields = buildBillingFields(req.body || {});
     if (!fields.truck || !fields.partyName || !fields.date || !Number.isFinite(fields.amount)) {
       return res.status(400).json({ success: false, error: 'Truck, party name, date, and amount are required' });
     }
 
-    const billingTrip = await BillingTrip.create({ ...fields, owner: req.user._id });
+    const billingTrip = await BillingTrip.create({ ...fields, owner: req.accountId });
 
     Notification.create({
-      owner: req.user._id,
+      owner: req.accountId,
       type: 'event',
       title: 'Trip Added',
       message: `Trip for ${billingTrip.partyName} (${billingTrip.truck}) added — ₹${billingTrip.amount.toLocaleString()}`,
@@ -175,7 +175,7 @@ router.post('/', protect, async (req, res) => {
 });
 
 // PUT /api/billing-trips/:id — full update (edit modal + payment recording).
-router.put('/:id', protect, async (req, res) => {
+router.put('/:id', protect, requirePermission('billing', 'update'), async (req, res) => {
   try {
     const fields = buildBillingFields(req.body || {});
     const before = await BillingTrip.findOne({ _id: req.params.id, ...ownedBy(req) }).select('status');
@@ -189,7 +189,7 @@ router.put('/:id', protect, async (req, res) => {
 
     if (fields.status === 'Paid' && before.status !== 'Paid') {
       Notification.create({
-        owner: req.user._id,
+        owner: req.accountId,
         type: 'event',
         title: 'Trip Completed',
         message: `Payment recorded for ${billingTrip.partyName} (${billingTrip.truck}) — ₹${billingTrip.amount.toLocaleString()}`,
@@ -212,7 +212,7 @@ const DOCUMENTS = {
   goods: { draw: drawGoodsDeclaration, prefix: 'Goods-Declaration' }
 };
 
-router.get('/:id/documents/:kind', protect, async (req, res) => {
+router.get('/:id/documents/:kind', protect, requirePermission('billing', 'read'), async (req, res) => {
   const kind = String(req.params.kind).replace(/\.pdf$/, '');
   const document = DOCUMENTS[kind];
   if (!document) {
@@ -241,7 +241,7 @@ router.get('/:id/documents/:kind', protect, async (req, res) => {
 });
 
 // DELETE /api/billing-trips/:id — remove one of the caller's billing trips.
-router.delete('/:id', protect, async (req, res) => {
+router.delete('/:id', protect, requirePermission('billing', 'delete'), async (req, res) => {
   try {
     const billingTrip = await BillingTrip.findOneAndDelete({ _id: req.params.id, ...ownedBy(req) });
     if (!billingTrip) return res.status(404).json({ success: false, error: 'Billing trip not found' });

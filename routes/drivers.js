@@ -1,12 +1,12 @@
 import express from 'express';
 import Driver from '../models/Driver.js';
 import Truck from '../models/Truck.js';
-import { protect } from '../middleware/auth.js';
+import { protect, requirePermission } from '../middleware/auth.js';
 import { normaliseDriver } from '../utils/drivers.js';
 
 const router = express.Router();
 
-const ownedBy = (req) => ({ owner: req.user._id });
+const ownedBy = (req) => ({ owner: req.accountId });
 
 // Confirms a truck belongs to the caller before a driver is pinned to it, so a
 // client cannot attach drivers to someone else's truck by guessing an id.
@@ -27,7 +27,7 @@ const demoteSiblings = async (truckId, ownerId, exceptId) => {
 
 // GET /api/drivers — the caller's drivers. `?truck=<id>` narrows to one truck;
 // `?unassigned=1` returns those not on any truck.
-router.get('/', protect, async (req, res) => {
+router.get('/', protect, requirePermission('drivers', 'read'), async (req, res) => {
   try {
     const query = ownedBy(req);
     if (req.query.truck) query.truck = req.query.truck;
@@ -44,7 +44,7 @@ router.get('/', protect, async (req, res) => {
 });
 
 // POST /api/drivers — add one driver, optionally assigned to a truck.
-router.post('/', protect, async (req, res) => {
+router.post('/', protect, requirePermission('drivers', 'create'), async (req, res) => {
   try {
     const fields = normaliseDriver(req.body || {});
     if (!fields || !fields.name || !fields.mobile) {
@@ -62,8 +62,8 @@ router.post('/', protect, async (req, res) => {
       if (existing === 0) fields.isPrimary = true;
     }
 
-    const driver = await Driver.create({ ...fields, truck: truckId, owner: req.user._id });
-    if (driver.isPrimary) await demoteSiblings(truckId, req.user._id, driver._id);
+    const driver = await Driver.create({ ...fields, truck: truckId, owner: req.accountId });
+    if (driver.isPrimary) await demoteSiblings(truckId, req.accountId, driver._id);
 
     res.status(201).json({ success: true, driver });
   } catch (error) {
@@ -76,7 +76,7 @@ router.post('/', protect, async (req, res) => {
 });
 
 // PUT /api/drivers/:id — update one of the caller's drivers.
-router.put('/:id', protect, async (req, res) => {
+router.put('/:id', protect, requirePermission('drivers', 'update'), async (req, res) => {
   try {
     const fields = normaliseDriver(req.body || {});
     if (!fields || !fields.name || !fields.mobile) {
@@ -100,7 +100,7 @@ router.put('/:id', protect, async (req, res) => {
     );
     if (!driver) return res.status(404).json({ success: false, error: 'Driver not found' });
 
-    if (driver.isPrimary) await demoteSiblings(driver.truck, req.user._id, driver._id);
+    if (driver.isPrimary) await demoteSiblings(driver.truck, req.accountId, driver._id);
 
     res.json({ success: true, driver });
   } catch (error) {
@@ -112,7 +112,7 @@ router.put('/:id', protect, async (req, res) => {
 });
 
 // DELETE /api/drivers/:id — remove a driver from the roster entirely.
-router.delete('/:id', protect, async (req, res) => {
+router.delete('/:id', protect, requirePermission('drivers', 'delete'), async (req, res) => {
   try {
     const driver = await Driver.findOneAndDelete({ _id: req.params.id, ...ownedBy(req) });
     if (!driver) return res.status(404).json({ success: false, error: 'Driver not found' });

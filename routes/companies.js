@@ -1,11 +1,13 @@
 import express from 'express';
 import Company from '../models/Company.js';
-import { protect } from '../middleware/auth.js';
+import { protect, requirePermission } from '../middleware/auth.js';
 import { parseImageDataUrl } from '../utils/images.js';
 
 const router = express.Router();
 
-const ownedBy = (req) => ({ owner: req.user._id });
+// Scoped to the account, not the caller: a Fleet Manager and the admin who
+// added them read and write the same company master.
+const ownedBy = (req) => ({ owner: req.accountId });
 
 // Logos print at the top of every document, so they can afford a little more
 // room than a signature mark.
@@ -95,7 +97,7 @@ const buildCompanyFields = (body) => {
 // GET /api/companies — the caller's company master. Returns company: null
 // rather than 404 when none exists yet, so the Settings page can render an
 // empty form instead of treating a first-time account as an error.
-router.get('/', protect, async (req, res) => {
+router.get('/', protect, requirePermission('company', 'read'), async (req, res) => {
   try {
     const company = await Company.findOne(ownedBy(req));
     res.json({ success: true, company });
@@ -107,7 +109,7 @@ router.get('/', protect, async (req, res) => {
 
 // POST /api/companies — create the caller's company master. One per account:
 // if it already exists this is a conflict, not a second record.
-router.post('/', protect, async (req, res) => {
+router.post('/', protect, requirePermission('company', 'create'), async (req, res) => {
   try {
     const existing = await Company.findOne(ownedBy(req));
     if (existing) {
@@ -123,7 +125,7 @@ router.post('/', protect, async (req, res) => {
       return res.status(400).json({ success: false, error: 'Company name is required' });
     }
 
-    const company = await Company.create({ ...fields, owner: req.user._id });
+    const company = await Company.create({ ...fields, owner: req.accountId });
     res.status(201).json({ success: true, company });
   } catch (error) {
     if (error.name === 'ValidationError') {
@@ -141,7 +143,7 @@ router.post('/', protect, async (req, res) => {
 
 // PUT /api/companies — update the caller's company master, creating it on the
 // first save so the Settings form does not have to know which verb it needs.
-router.put('/', protect, async (req, res) => {
+router.put('/', protect, requirePermission('company', 'update'), async (req, res) => {
   try {
     const { fields, error } = buildCompanyFields(req.body || {});
     if (error) return res.status(400).json({ success: false, error });
@@ -152,7 +154,7 @@ router.put('/', protect, async (req, res) => {
       if (!fields.name) {
         return res.status(400).json({ success: false, error: 'Company name is required' });
       }
-      company = new Company({ ...fields, owner: req.user._id });
+      company = new Company({ ...fields, owner: req.accountId });
     } else {
       if (fields.name === '') {
         return res.status(400).json({ success: false, error: 'Company name is required' });
@@ -175,7 +177,7 @@ router.put('/', protect, async (req, res) => {
 
 // DELETE /api/companies — remove the caller's company master. Documents fall
 // back to the User profile afterwards, so this never leaves them unrenderable.
-router.delete('/', protect, async (req, res) => {
+router.delete('/', protect, requirePermission('company', 'delete'), async (req, res) => {
   try {
     const company = await Company.findOneAndDelete(ownedBy(req));
     if (!company) return res.status(404).json({ success: false, error: 'Company not found' });

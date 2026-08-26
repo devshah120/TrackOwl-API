@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
+import { ROLES, ROLE_VALUES, expandGrants } from '../utils/permissions.js';
 
 const userSchema = new mongoose.Schema({
   name: {
@@ -26,15 +27,29 @@ const userSchema = new mongoose.Schema({
     minlength: [8, 'Password must be at least 8 characters'],
     select: false
   },
+  // Company and fleet size are collected at sign-up, so they are required of an
+  // account owner but not of the staff seats they later add — a Fleet Manager
+  // inherits both from the account they belong to.
   company: {
     type: String,
-    required: [true, 'Company name is required'],
-    trim: true
+    required: [
+      function () { return !this.account; },
+      'Company name is required'
+    ],
+    trim: true,
+    default: ''
   },
   fleet: {
     type: String,
-    enum: ['1–5 trucks', '6–20 trucks', '21–50 trucks', '50+ trucks'],
-    required: [true, 'Fleet size is required']
+    enum: {
+      values: ['1–5 trucks', '6–20 trucks', '21–50 trucks', '50+ trucks', ''],
+      message: 'Fleet size is not valid'
+    },
+    required: [
+      function () { return !this.account; },
+      'Fleet size is required'
+    ],
+    default: ''
   },
   address: { type: String, trim: true, default: '' },
   city: { type: String, trim: true, default: '' },
@@ -66,9 +81,37 @@ const userSchema = new mongoose.Schema({
   },
   role: {
     type: String,
-    enum: ['superadmin', 'client'],
-    default: 'client'
+    enum: {
+      values: ROLE_VALUES,
+      message: 'Role must be one of: ' + ROLE_VALUES.join(', ')
+    },
+    default: ROLES.COMPANY_ADMIN
   },
+
+  // The account this user belongs to — always a company_admin's id.
+  //
+  // Unset on a company_admin (they *are* the account) and on a super_admin
+  // (who is scoped to no account at all). Set on every staff seat, which is
+  // what lets a Fleet Manager and an Accountant added by the same admin see
+  // one shared set of trucks, trips and ledger entries: `protect` resolves
+  // this into `req.accountId`, and every data route scopes its queries by it
+  // rather than by the caller's own id.
+  account: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null,
+    index: true
+  },
+
+  // Who added this seat. Audit only — nothing is scoped by it.
+  createdBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null
+  },
+
+  // Stamped on each successful login, so an admin can spot a dormant seat.
+  lastLoginAt: { type: Date, default: null },
   isActive: {
     type: Boolean,
     default: true
@@ -97,10 +140,22 @@ userSchema.methods.matchPassword = async function(enteredPassword) {
   return await bcrypt.compare(enteredPassword, this.password);
 };
 
-// Remove password from response
+// The id of the account whose data this user works on: their own for an
+// account owner, the parent's for a staff seat. super_admin has no account —
+// their routes are platform-wide and never scoped by this.
+userSchema.virtual('accountId').get(function () {
+  return this.account || this._id;
+});
+
+// Remove password from response, and hand the client its permission list so the
+// UI can hide what the API would refuse. Derived from the role on every read
+// rather than stored, so a change to the matrix takes effect immediately
+// instead of needing a backfill.
 userSchema.methods.toJSON = function() {
   const obj = this.toObject();
   delete obj.password;
+  obj.accountId = String(this.account || this._id);
+  obj.permissions = expandGrants(this.role);
   return obj;
 };
 

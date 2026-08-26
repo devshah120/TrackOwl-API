@@ -1,7 +1,7 @@
 import express from 'express';
 import Device from '../models/Device.js';
 import Position from '../models/Position.js';
-import { protect } from '../middleware/auth.js';
+import { protect, requirePermission } from '../middleware/auth.js';
 import { detectStops } from '../utils/tripStops.js';
 import { describePoints } from '../services/placeLookup.js';
 
@@ -10,7 +10,7 @@ const router = express.Router();
 // Device history is scoped to the caller, same as everything else that touches
 // position data — a device's movements are exactly the thing another account
 // must not be able to read.
-const ownedBy = (req) => ({ owner: req.user._id });
+const ownedBy = (req) => ({ owner: req.accountId });
 
 // Same guards the trip trail uses: a fix with a huge error radius is a
 // cell-tower estimate rather than a satellite lock, and a near-null coordinate
@@ -75,7 +75,7 @@ const dayRange = (dateStr, tzOffsetMin = 0) => {
 // One day of a vehicle's movement: the path it drove, where it held and for how
 // long, and how far it covered. This is the "what did this truck do on Tuesday"
 // view, as opposed to the trip-scoped trail which only covers a planned job.
-router.get('/:deviceId', protect, async (req, res) => {
+router.get('/:deviceId', protect, requirePermission('tracking', 'read'), async (req, res) => {
   try {
     const device = await Device.findOne({ _id: req.params.deviceId, ...ownedBy(req) })
       .select('name uniqueId');
@@ -157,7 +157,7 @@ router.get('/:deviceId', protect, async (req, res) => {
 // Per-day distance across a range, for the "all date-wise km" table. Computed
 // with one aggregation-free pass over the range rather than a query per day, so
 // a month costs one round trip.
-router.get('/:deviceId/summary', protect, async (req, res) => {
+router.get('/:deviceId/summary', protect, requirePermission('tracking', 'read'), async (req, res) => {
   try {
     const device = await Device.findOne({ _id: req.params.deviceId, ...ownedBy(req) }).select('name');
     if (!device) return res.status(404).json({ success: false, error: 'Device not found' });
