@@ -19,6 +19,7 @@ import adminRoutes from './routes/admin.js';
 import geoRoutes from './routes/geo.js';
 import historyRoutes from './routes/history.js';
 import companyRoutes from './routes/companies.js';
+import { initRolePermissions } from './services/rolePermissions.js';
 
 dotenv.config();
 
@@ -53,7 +54,13 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 // MongoDB Connection
 mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/trackowl')
-  .then(() => console.log('✓ MongoDB connected'))
+  .then(async () => {
+    console.log('✓ MongoDB connected');
+    // Pull the role permission matrix into memory before serving traffic. If
+    // this fails the guards fall back to the built-in defaults rather than
+    // denying everything, so a permissions read never takes the API down.
+    await initRolePermissions();
+  })
   .catch((err) => console.log('✗ MongoDB connection error:', err));
 
 // Routes

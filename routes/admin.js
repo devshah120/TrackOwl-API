@@ -6,7 +6,20 @@ import Device from '../models/Device.js';
 import LedgerEntry from '../models/LedgerEntry.js';
 import Notification from '../models/Notification.js';
 import { protect, requireSuperAdmin } from '../middleware/auth.js';
-import { ROLES } from '../utils/permissions.js';
+import RolePermission from '../models/RolePermission.js';
+import {
+  ROLES,
+  ROLE_LABELS,
+  RESOURCES,
+  ACTIONS,
+  EDITABLE_ROLES,
+  LOCKED_ROLES,
+  DEFAULT_GRANTS,
+  isValidGrant,
+  sameEffectiveGrants,
+  grantsFor
+} from '../utils/permissions.js';
+import { loadRolePermissions } from '../services/rolePermissions.js';
 import { registerDevice } from '../services/deviceRegistration.js';
 import { readDriverList, syncTruckDrivers, attachDrivers } from '../utils/drivers.js';
 
@@ -337,6 +350,167 @@ router.get('/stats', async (req, res) => {
   } catch (error) {
     console.error('[admin] stats failed:', error.message);
     res.status(500).json({ success: false, error: 'Failed to fetch platform stats' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Role permission matrix
+//
+// The platform-wide definition of what each staff role may do. Editing this
+// changes every customer's Fleet Manager, Accountant, Viewer and Driver at
+// once, which is why it lives behind the superadmin gate at the top of this
+// file rather than in a customer's own settings.
+//
+// super_admin and company_admin are absent by design: they are fixed in code so
+// that no edit can leave the platform with nobody able to reach this editor.
+// ---------------------------------------------------------------------------
+
+// GET /api/admin/permissions — the current matrix, plus the vocabulary the
+// editor needs to render a grid (which resources and actions exist) and the
+// shipped defaults so the UI can offer a per-role "reset".
+router.get('/permissions', async (req, res) => {
+  try {
+    const rows = await RolePermission.find().populate('updatedBy', 'name email');
+    const storedByRole = new Map(rows.map((r) => [r.role, r]));
+
+    const roles = EDITABLE_ROLES.map((role) => {
+      const stored = storedByRole.get(role);
+      return {
+        role,
+        label: ROLE_LABELS[role],
+        // grantsFor is the runtime's own answer, so what the editor shows is
+        // exactly what the guards will enforce.
+        grants: grantsFor(role),
+        defaults: DEFAULT_GRANTS[role] || [],
+        // Whether this role still means what shipped — drives an "edited"
+        // marker in the UI. Compared by effect, not by text: the editor saves
+        // what the ticks say, so an untouched Viewer comes back as nine
+        // explicit grants instead of '*:read' and must not read as customised.
+        isCustomised: !sameEffectiveGrants(grantsFor(role), DEFAULT_GRANTS[role] || []),
+        updatedBy: stored?.updatedBy || null,
+        updatedAt: stored?.updatedAt || null
+      };
+    });
+
+    res.json({
+      success: true,
+      matrix: {
+        resources: RESOURCES,
+        // `manage` is an internal shorthand that implies the other four; the
+        // editor works in concrete verbs, so it is not offered as a column.
+        actions: ACTIONS.filter((a) => a !== 'manage'),
+        roles,
+        // Shown read-only in the editor so it is obvious why they are absent.
+        locked: LOCKED_ROLES.map((role) => ({
+          role,
+          label: ROLE_LABELS[role],
+          grants: grantsFor(role)
+        }))
+      }
+    });
+  } catch (error) {
+    console.error('[admin] permissions fetch failed:', error.message);
+    res.status(500).json({ success: false, error: 'Failed to fetch permissions' });
+  }
+});
+
+// PUT /api/admin/permissions/:role — replace one role's grants.
+//
+// The whole list is sent rather than a diff: the editor holds the full row, and
+// a replace makes "unticking the last box" unambiguous.
+router.put('/permissions/:role', async (req, res) => {
+  try {
+    const { role } = req.params;
+    const { grants } = req.body || {};
+
+    if (LOCKED_ROLES.includes(role)) {
+      return res.status(400).json({
+        success: false,
+        error: `${ROLE_LABELS[role] || role} is fixed and cannot be edited`
+      });
+    }
+    if (!EDITABLE_ROLES.includes(role)) {
+      return res.status(404).json({ success: false, error: 'Unknown role' });
+    }
+    if (!Array.isArray(grants)) {
+      return res.status(400).json({ success: false, error: 'grants must be an array' });
+    }
+
+    // Reject the whole payload on a bad entry rather than silently dropping it,
+    // so the editor cannot quietly save something narrower than it displays.
+    const invalid = grants.filter((g) => !isValidGrant(g));
+    if (invalid.length) {
+      return res.status(400).json({
+        success: false,
+        error: `Not a valid permission: ${invalid.slice(0, 3).join(', ')}`
+      });
+    }
+
+    const deduped = [...new Set(grants)];
+
+    const updated = await RolePermission.findOneAndUpdate(
+      { role },
+      { $set: { grants: deduped, updatedBy: req.user._id, updatedAt: new Date() } },
+      { new: true, upsert: true, runValidators: true }
+    );
+
+    // The cache is what every request actually reads, so a save that did not
+    // refresh it would appear to work and change nothing.
+    await loadRolePermissions();
+
+    res.json({
+      success: true,
+      message: `${ROLE_LABELS[role]} permissions updated`,
+      role: {
+        role,
+        label: ROLE_LABELS[role],
+        grants: grantsFor(role),
+        defaults: DEFAULT_GRANTS[role] || [],
+        updatedAt: updated.updatedAt
+      }
+    });
+  } catch (error) {
+    if (error.name === 'ValidationError') {
+      return res.status(400).json({ success: false, error: error.message });
+    }
+    console.error('[admin] permissions update failed:', error.message);
+    res.status(500).json({ success: false, error: 'Failed to update permissions' });
+  }
+});
+
+// POST /api/admin/permissions/:role/reset — put one role back to its shipped
+// defaults. The way out of an edit that went wrong, without having to remember
+// what the original ticks were.
+router.post('/permissions/:role/reset', async (req, res) => {
+  try {
+    const { role } = req.params;
+
+    if (LOCKED_ROLES.includes(role)) {
+      return res.status(400).json({
+        success: false,
+        error: `${ROLE_LABELS[role] || role} is fixed and cannot be edited`
+      });
+    }
+    if (!EDITABLE_ROLES.includes(role)) {
+      return res.status(404).json({ success: false, error: 'Unknown role' });
+    }
+
+    const defaults = DEFAULT_GRANTS[role] || [];
+    await RolePermission.findOneAndUpdate(
+      { role },
+      { $set: { grants: defaults, updatedBy: req.user._id, updatedAt: new Date() } },
+      { new: true, upsert: true, runValidators: true }
+    );
+    await loadRolePermissions();
+
+    res.json({
+      success: true,
+      message: `${ROLE_LABELS[role]} reset to defaults`,
+      role: { role, label: ROLE_LABELS[role], grants: grantsFor(role), defaults }
+    });
+  } catch (error) {
+    console.error('[admin] permissions reset failed:', error.message);
+    res.status(500).json({ success: false, error: 'Failed to reset permissions' });
   }
 });
 
