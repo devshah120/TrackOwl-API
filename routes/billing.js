@@ -4,6 +4,7 @@ import Notification from '../models/Notification.js';
 import { protect } from '../middleware/auth.js';
 import { streamPdf } from '../utils/pdf.js';
 import { drawLorryReceipt, drawTaxInvoice, drawGoodsDeclaration } from '../utils/documents.js';
+import { profileForDocuments } from '../utils/company.js';
 
 const router = express.Router();
 
@@ -222,10 +223,14 @@ router.get('/:id/documents/:kind', protect, async (req, res) => {
     const trip = await BillingTrip.findOne({ _id: req.params.id, ...ownedBy(req) });
     if (!trip) return res.status(404).json({ success: false, error: 'Billing trip not found' });
 
+    // Company details come from the Company master where one is set up,
+    // falling back to the User profile for accounts that have not filled it in.
+    const profile = await profileForDocuments(req.user);
+
     // Slashes in an LR number would break the Content-Disposition filename.
     const ref = String(trip.lr || trip.bill || trip._id).replace(/[^\w.-]+/g, '-');
     streamPdf(res, `${document.prefix}-${ref}.pdf`, (doc) => {
-      document.draw(doc, trip.toObject(), req.user);
+      document.draw(doc, trip.toObject(), profile);
     });
   } catch (error) {
     console.error('[billing] document render failed:', error.message);

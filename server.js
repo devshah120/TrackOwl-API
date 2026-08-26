@@ -17,6 +17,7 @@ import notificationRoutes from './routes/notifications.js';
 import adminRoutes from './routes/admin.js';
 import geoRoutes from './routes/geo.js';
 import historyRoutes from './routes/history.js';
+import companyRoutes from './routes/companies.js';
 
 dotenv.config();
 
@@ -68,6 +69,7 @@ app.use('/api/notifications', notificationRoutes);
 app.use('/api/history', historyRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/geo', geoRoutes);
+app.use('/api/companies', companyRoutes);
 
 // Public tracking page. The token is validated by /api/track/public/:token,
 // which the page itself calls — this only serves the map shell.

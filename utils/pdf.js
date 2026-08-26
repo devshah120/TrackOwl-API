@@ -106,8 +106,29 @@ export const signatureMark = (doc, user, x, y, w, h) => {
   }
 };
 
-// Transporter header shared by every document, drawn from the user's profile
-// so each client's own company details appear.
+// Draws the company logo flush left in the header band, vertically centred
+// against the name block. Returns nothing — the header text stays centred on
+// the full width either way, so a company with no logo is unaffected.
+const LOGO_BOX = 46;
+
+const headerLogo = (doc, dataUrl, x, y) => {
+  if (!dataUrl) return;
+  try {
+    const base64 = dataUrl.split(',')[1];
+    if (!base64) return;
+    doc.image(Buffer.from(base64, 'base64'), x, y, {
+      fit: [LOGO_BOX, LOGO_BOX],
+      align: 'left',
+      valign: 'center'
+    });
+  } catch {
+    // A corrupt logo must not take the whole document down — the header simply
+    // renders without it, the same as an account that never uploaded one.
+  }
+};
+
+// Transporter header shared by every document, drawn from the resolved company
+// profile (see utils/company.js) so each client's own details appear.
 export const companyHeader = (doc, user, x, y, w, { title = '', subjectTo = '' } = {}) => {
   if (subjectTo) {
     doc.font('Helvetica').fontSize(7).fillColor('#333')
@@ -115,8 +136,15 @@ export const companyHeader = (doc, user, x, y, w, { title = '', subjectTo = '' }
   }
 
   const nameY = subjectTo ? y + 9 : y;
+  headerLogo(doc, user.logo, x + 4, nameY);
   doc.font('Helvetica-Bold').fontSize(18).fillColor('#1a3a8f')
     .text(user.company || 'Transport Company', x, nameY, { width: w, align: 'center' });
+
+  // The registered entity, where it differs from the trading name above.
+  if (user.legalName && user.legalName !== user.company) {
+    doc.font('Helvetica').fontSize(7.5).fillColor('#333')
+      .text(user.legalName, x, doc.y + 1, { width: w, align: 'center' });
+  }
 
   if (title) {
     doc.font('Helvetica-Bold').fontSize(8).fillColor('#1a3a8f')
@@ -135,7 +163,11 @@ export const companyHeader = (doc, user, x, y, w, { title = '', subjectTo = '' }
     doc.text(line, x, doc.y + 1.5, { width: w, align: 'center' });
   });
 
-  return doc.y + 4;
+  // The logo sits outside the text flow, so doc.y alone can leave the header
+  // shorter than the image and let the next block overlap it.
+  const textBottom = doc.y + 4;
+  const logoBottom = user.logo ? nameY + LOGO_BOX + 2 : 0;
+  return Math.max(textBottom, logoBottom);
 };
 
 // Streams a document to the HTTP response as an inline-named PDF download.
