@@ -3,7 +3,6 @@ import User from '../models/User.js';
 import { protect, requirePermission } from '../middleware/auth.js';
 import { validateEmail, validatePassword, validateMobile } from '../utils/validators.js';
 import {
-  ROLES,
   ASSIGNABLE_ROLES,
   ROLE_LABELS,
   expandGrants
@@ -23,20 +22,19 @@ const rosterOf = (req) => ({
 // has exactly one owner, which keeps `User.account` a single unambiguous hop.
 const isAssignable = (role) => ASSIGNABLE_ROLES.includes(role);
 
-// Writing the roster is the account owner's job. A Fleet Manager or Accountant
-// holds `users:read` so they can see who their colleagues are, but the create,
-// edit, deactivate and delete verbs below are the owner's alone — otherwise a
-// staff seat could quietly grant itself a wider role.
-const requireRosterWrite = (req, res, next) => {
-  const role = req.user?.role;
-  if (role !== ROLES.COMPANY_ADMIN && role !== ROLES.SUPER_ADMIN) {
-    return res.status(403).json({
-      success: false,
-      error: 'Only a Company Admin can manage users'
-    });
-  }
-  next();
-};
+// Writing the roster follows the permission matrix like every other resource:
+// a seat holding `users:create` may add a colleague, `users:update` may edit
+// one, `users:delete` may remove one. A Super Admin who has not granted those
+// leaves the roster owner-only, which is the shipped default.
+//
+// Self-promotion is not a risk here because `isAssignable` caps every role this
+// route will accept at the four staff seats — company_admin comes only from
+// registration or a Super Admin, and super_admin from neither. The worst a
+// staff seat with `users:update` can do is move a peer between staff roles,
+// which is exactly what granting them the permission means.
+//
+// The owner's own row is refused by each handler below regardless of grants, so
+// there is always a seat left that can reach Settings and undo a bad edit.
 
 // GET /api/users/roles — the roles this account may assign, for the form's
 // dropdown. Sent from the server so the labels and the enum cannot drift apart.
@@ -79,7 +77,7 @@ router.get('/', protect, requirePermission('users', 'read'), async (req, res) =>
 //
 // The new user inherits the account's company name rather than supplying their
 // own: they are staff at one company, not a separate registration.
-router.post('/', protect, requireRosterWrite, async (req, res) => {
+router.post('/', protect, requirePermission('users', 'create'), async (req, res) => {
   try {
     const { name, email, mobile, password, role } = req.body || {};
 
@@ -149,7 +147,7 @@ router.post('/', protect, requireRosterWrite, async (req, res) => {
 //
 // The account owner's own row is not editable here: it is the login profile,
 // which they change under Settings → Company Details.
-router.put('/:id', protect, requireRosterWrite, async (req, res) => {
+router.put('/:id', protect, requirePermission('users', 'update'), async (req, res) => {
   try {
     if (String(req.params.id) === String(req.accountId)) {
       return res.status(400).json({
@@ -217,7 +215,7 @@ router.put('/:id', protect, requireRosterWrite, async (req, res) => {
 // PATCH /api/users/:id/status — switch a seat on or off. `protect` re-checks
 // isActive on every request, so this takes effect immediately rather than when
 // the user's token expires.
-router.patch('/:id/status', protect, requireRosterWrite, async (req, res) => {
+router.patch('/:id/status', protect, requirePermission('users', 'update'), async (req, res) => {
   try {
     const { isActive } = req.body || {};
     if (typeof isActive !== 'boolean') {
@@ -253,7 +251,7 @@ router.patch('/:id/status', protect, requireRosterWrite, async (req, res) => {
 // POST /api/users/:id/reset-password — the admin sets a new password directly.
 // The user's own forgot-password/OTP flow still works alongside this; this is
 // the path for "they are locked out and need it fixed now".
-router.post('/:id/reset-password', protect, requireRosterWrite, async (req, res) => {
+router.post('/:id/reset-password', protect, requirePermission('users', 'update'), async (req, res) => {
   try {
     const { newPassword } = req.body || {};
 
@@ -284,7 +282,7 @@ router.post('/:id/reset-password', protect, requireRosterWrite, async (req, res)
 // Nothing owned is deleted with them: every truck, trip and ledger entry is
 // owned by the account, not by the seat that happened to create it, so removing
 // a user takes away their login and leaves the account's data intact.
-router.delete('/:id', protect, requireRosterWrite, async (req, res) => {
+router.delete('/:id', protect, requirePermission('users', 'delete'), async (req, res) => {
   try {
     if (String(req.params.id) === String(req.accountId)) {
       return res.status(400).json({
