@@ -1,5 +1,5 @@
 import express from 'express';
-import Truck from '../models/Truck.js';
+import Truck, { VEHICLE_TYPES, FUEL_TYPES, BODY_TYPES, VEHICLE_STATUSES } from '../models/Truck.js';
 import Driver from '../models/Driver.js';
 import Notification from '../models/Notification.js';
 import { protect, requirePermission } from '../middleware/auth.js';
@@ -12,6 +12,14 @@ const ownedBy = (req) => ({ owner: req.accountId });
 // Builds a Truck-shaped update object from the flat AddNewTruck form payload,
 // only including fields that were actually sent. Drivers are not part of this —
 // they are their own collection now and are synced separately.
+// An empty string from a cleared number input means "no value", which is not
+// the same as 0 — `null` clears the field without tripping the min validators.
+const numberOrNull = (v) => {
+  if (v === undefined || v === null || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+};
+
 const buildTruckFields = (body) => {
   const fields = {};
   if (body.number !== undefined) fields.number = String(body.number).trim();
@@ -20,6 +28,31 @@ const buildTruckFields = (body) => {
   if (body.insuranceExpiry !== undefined) fields.insuranceExpiry = body.insuranceExpiry || undefined;
   if (body.status !== undefined) fields.status = body.status;
   if (body.currentRoute !== undefined) fields.currentRoute = String(body.currentRoute).trim();
+
+  // Vehicle master. Each field is optional on the wire; only what was sent is
+  // written, so a partial form save never blanks the rest of the record.
+  if (body.vehicleType !== undefined) fields.vehicleType = body.vehicleType;
+  if (body.make !== undefined) fields.make = String(body.make).trim();
+  if (body.manufactureYear !== undefined) fields.manufactureYear = numberOrNull(body.manufactureYear);
+  if (body.fuelType !== undefined) fields.fuelType = body.fuelType;
+  if (body.odometer !== undefined) fields.odometer = numberOrNull(body.odometer) ?? 0;
+
+  // Capacity and purchase are nested, so they are set with dotted paths: a
+  // whole-subdocument $set would wipe the siblings the form didn't send.
+  if (body.capacity !== undefined) {
+    const c = body.capacity || {};
+    if (c.weightKg !== undefined) fields['capacity.weightKg'] = numberOrNull(c.weightKg);
+    if (c.volumeM3 !== undefined) fields['capacity.volumeM3'] = numberOrNull(c.volumeM3);
+    if (c.bodyType !== undefined) fields['capacity.bodyType'] = c.bodyType;
+  }
+  if (body.purchase !== undefined) {
+    const pu = body.purchase || {};
+    if (pu.date !== undefined) fields['purchase.date'] = pu.date || undefined;
+    if (pu.price !== undefined) fields['purchase.price'] = numberOrNull(pu.price);
+    if (pu.vendor !== undefined) fields['purchase.vendor'] = String(pu.vendor).trim();
+    if (pu.financedBy !== undefined) fields['purchase.financedBy'] = String(pu.financedBy).trim();
+  }
+
   return fields;
 };
 
@@ -27,6 +60,21 @@ const buildTruckFields = (body) => {
 // syncTruckDrivers can match each row back to its existing _id.
 const rawDriverRows = (body) =>
   Array.isArray(body?.drivers) ? body.drivers : body?.driver ? [body.driver] : [];
+
+// GET /api/trucks/options — the vehicle master vocabularies, so the form's
+// dropdowns are driven by the same lists the model validates against instead
+// of a copy that can drift out of sync.
+router.get('/options', protect, requirePermission('trucks', 'read'), (req, res) => {
+  res.json({
+    success: true,
+    options: {
+      vehicleTypes: VEHICLE_TYPES,
+      fuelTypes: FUEL_TYPES,
+      bodyTypes: BODY_TYPES,
+      statuses: VEHICLE_STATUSES
+    }
+  });
+});
 
 // GET /api/trucks — the caller's trucks, newest first, each with its drivers.
 router.get('/', protect, requirePermission('trucks', 'read'), async (req, res) => {
@@ -91,6 +139,21 @@ router.put('/:id', protect, requirePermission('trucks', 'update'), async (req, r
   try {
     const body = req.body || {};
     const fields = buildTruckFields(body);
+
+    // An odometer only ever climbs. A lower reading is a typo far more often
+    // than a genuine correction, and silently accepting it would understate
+    // every distance derived from it, so it is rejected rather than clamped.
+    if (fields.odometer !== undefined) {
+      const current = await Truck.findOne({ _id: req.params.id, ...ownedBy(req) }).select('odometer');
+      if (!current) return res.status(404).json({ success: false, error: 'Truck not found' });
+      if (fields.odometer < (current.odometer || 0)) {
+        return res.status(400).json({
+          success: false,
+          error: `Odometer cannot go backwards (current reading is ${current.odometer} km)`
+        });
+      }
+    }
+
     const truck = await Truck.findOneAndUpdate(
       { _id: req.params.id, ...ownedBy(req) },
       { $set: fields },

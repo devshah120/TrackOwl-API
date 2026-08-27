@@ -1,6 +1,6 @@
 import express from 'express';
 import User from '../models/User.js';
-import Truck from '../models/Truck.js';
+import Truck, { VEHICLE_STATUSES } from '../models/Truck.js';
 import Driver from '../models/Driver.js';
 import Device from '../models/Device.js';
 import LedgerEntry from '../models/LedgerEntry.js';
@@ -304,12 +304,14 @@ router.get('/stats', async (req, res) => {
       ])
     ]);
 
+    // Seeded from the model's status list so a new status shows up as a zero
+    // bucket rather than being missing from the overview until one is used.
     const trucksByStatus = trucks.reduce(
       (acc, t) => {
         acc[t.status] = (acc[t.status] || 0) + 1;
         return acc;
       },
-      { Running: 0, Idle: 0, Stopped: 0 }
+      Object.fromEntries(VEHICLE_STATUSES.map((s) => [s, 0]))
     );
 
     const now = Date.now();
