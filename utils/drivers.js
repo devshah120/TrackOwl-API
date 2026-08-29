@@ -1,4 +1,4 @@
-import Driver from '../models/Driver.js';
+import Driver, { DRIVER_STATUSES } from '../models/Driver.js';
 
 // Shared driver helpers. Trucks are saved with their full driver list in one
 // form submit (AddNewTruck / the admin modal), while /api/drivers edits one
@@ -7,6 +7,20 @@ import Driver from '../models/Driver.js';
 
 // Normalises one driver row off a form payload. Returns null for a blank row so
 // an untouched extra row on the form is dropped rather than failing validation.
+// Shared by the nullable scalar fields below: `undefined` when the key was not
+// sent at all, `null` when it was sent blank, else the parsed value.
+const nullableDate = (raw, key) => {
+  if (!(key in raw)) return undefined;
+  return raw[key] ? raw[key] : null;
+};
+
+const nullableNumber = (raw, key) => {
+  if (!(key in raw)) return undefined;
+  const value = raw[key];
+  if (value === null || value === '' || Number.isNaN(Number(value))) return null;
+  return Number(value);
+};
+
 export const normaliseDriver = (raw) => {
   if (!raw || typeof raw !== 'object') return null;
 
@@ -14,14 +28,35 @@ export const normaliseDriver = (raw) => {
   const mobile = String(raw.mobile || '').replace(/\D/g, '');
   if (!name && !mobile) return null;
 
+  // Only built when the caller actually sent a contact. The truck form posts
+  // driver rows without one, and $set-ing a blank object there would erase a
+  // contact captured on the driver screen.
+  const rawContact = raw.emergencyContact;
+  const contact = rawContact && typeof rawContact === 'object'
+    ? {
+        name: String(rawContact.name || '').trim(),
+        relation: String(rawContact.relation || '').trim(),
+        mobile: String(rawContact.mobile || '').replace(/\D/g, '')
+      }
+    : undefined;
+
   return {
     name,
     mobile,
     licenseNumber: String(raw.licenseNumber || '').trim(),
-    licenseExpiry: raw.licenseExpiry || undefined,
-    salary: raw.salary !== undefined && raw.salary !== '' && raw.salary !== null
-      ? Number(raw.salary)
-      : undefined,
+    // Absent vs. explicitly emptied are different edits. A field the caller
+    // never sent stays undefined so $set skips it (the truck form posts only a
+    // subset); one the caller sent as null/'' becomes null so clearing a date
+    // or salary on the driver screen actually persists.
+    licenseExpiry: nullableDate(raw, 'licenseExpiry'),
+    joiningDate: nullableDate(raw, 'joiningDate'),
+    salary: nullableNumber(raw, 'salary'),
+    emergencyContact: contact,
+    // Left undefined when the caller sent nothing recognisable, so $set skips
+    // it: the truck form posts driver rows without a status, and that must not
+    // reset a driver who is On Trip or on Leave back to Available. New
+    // documents pick up the schema default instead.
+    status: DRIVER_STATUSES.includes(raw.status) ? raw.status : undefined,
     isPrimary: Boolean(raw.isPrimary)
   };
 };

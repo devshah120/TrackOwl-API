@@ -1,5 +1,5 @@
 import express from 'express';
-import Driver from '../models/Driver.js';
+import Driver, { DRIVER_STATUSES } from '../models/Driver.js';
 import Truck from '../models/Truck.js';
 import { protect, requirePermission } from '../middleware/auth.js';
 import { normaliseDriver } from '../utils/drivers.js';
@@ -25,13 +25,22 @@ const demoteSiblings = async (truckId, ownerId, exceptId) => {
   );
 };
 
+// GET /api/drivers/options — the driver master vocabulary, so the driver form
+// and status filter are populated from the same list the model validates on.
+router.get('/options', protect, requirePermission('drivers', 'read'), (req, res) => {
+  res.json({ success: true, options: { statuses: DRIVER_STATUSES } });
+});
+
 // GET /api/drivers — the caller's drivers. `?truck=<id>` narrows to one truck;
-// `?unassigned=1` returns those not on any truck.
+// `?unassigned=1` returns those not on any truck; `?status=` filters the roster.
 router.get('/', protect, requirePermission('drivers', 'read'), async (req, res) => {
   try {
     const query = ownedBy(req);
     if (req.query.truck) query.truck = req.query.truck;
     if (req.query.unassigned === '1') query.truck = null;
+    if (req.query.status && DRIVER_STATUSES.includes(req.query.status)) {
+      query.status = req.query.status;
+    }
 
     const drivers = await Driver.find(query)
       .populate('truck', 'number model')
