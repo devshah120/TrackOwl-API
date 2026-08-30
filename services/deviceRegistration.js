@@ -32,7 +32,11 @@ export const generateUniqueId = () =>
 // local Device owned by `ownerId`. Returns { device, setup } on success, or
 // throws an Error with a `status` (HTTP code) and `error` (client message)
 // for the caller to relay.
-export const registerDevice = async ({ name, type, uniqueId: requestedUniqueId, ownerId }) => {
+//
+// `master` carries the optional device-master fields (model, SIM, firmware,
+// install date, fitted vehicle...). Callers that only register a tracker — the
+// client's own /track/devices — simply omit it and get the defaults.
+export const registerDevice = async ({ name, type, uniqueId: requestedUniqueId, ownerId, master = {} }) => {
   const trimmedName = String(name || '').trim();
   if (!trimmedName) {
     const err = new Error('Vehicle name is required');
@@ -98,7 +102,12 @@ export const registerDevice = async ({ name, type, uniqueId: requestedUniqueId, 
     uniqueId,
     name: trimmedName,
     traccarId: traccarDevice.id,
-    owner: ownerId
+    owner: ownerId,
+    ...master,
+    deviceType,
+    // For hardware the IMEI *is* the uniqueId, so seed it rather than making
+    // the operator type the same 15 digits twice.
+    imei: master.imei || (deviceType === 'hardware' ? uniqueId : '')
   });
 
   return {

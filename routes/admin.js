@@ -2,7 +2,7 @@ import express from 'express';
 import User from '../models/User.js';
 import Truck, { VEHICLE_STATUSES } from '../models/Truck.js';
 import Driver from '../models/Driver.js';
-import Device from '../models/Device.js';
+import Device, { DEVICE_TYPES, DEVICE_LIFECYCLE_STATUSES } from '../models/Device.js';
 import LedgerEntry from '../models/LedgerEntry.js';
 import Notification from '../models/Notification.js';
 import { protect, requireSuperAdmin } from '../middleware/auth.js';
@@ -242,9 +242,95 @@ router.delete('/trucks/:id', async (req, res) => {
   }
 });
 
+// --- Device master -------------------------------------------------------
+// The tracking hardware, managed as its own asset register: what each unit is,
+// which SIM is in it, when it was fitted and to which vehicle. Distinct from
+// the trucks master (what is being tracked) and from live tracking (what the
+// unit is reporting right now).
+
+// The master fields a superadmin may write. Deliberately a whitelist: the
+// gateway identity (uniqueId, traccarId) and the telemetry cache
+// (lastPosition, lastSeenAt) are owned by the ingest path and must never be
+// settable from an admin form.
+const readDeviceMaster = (body = {}) => {
+  const master = {};
+  const str = (key, value) => {
+    if (value !== undefined) master[key] = String(value).trim();
+  };
+
+  str('model', body.model);
+  str('manufacturer', body.manufacturer);
+  str('firmwareVersion', body.firmwareVersion);
+  str('installedBy', body.installedBy);
+  str('notes', body.notes);
+  if (body.imei !== undefined) master.imei = String(body.imei).replace(/\D/g, '');
+  if (body.lifecycleStatus !== undefined) master.lifecycleStatus = body.lifecycleStatus;
+  if (body.installedAt !== undefined) master.installedAt = body.installedAt || null;
+
+  // SIM arrives as a nested object; each field is optional, so build it up
+  // key by key rather than replacing the whole subdocument with a partial one.
+  if (body.sim && typeof body.sim === 'object') {
+    const sim = {};
+    for (const key of ['number', 'iccid', 'provider', 'plan']) {
+      if (body.sim[key] !== undefined) sim[key] = String(body.sim[key]).trim();
+    }
+    if (body.sim.validTill !== undefined) sim.validTill = body.sim.validTill || null;
+    if (Object.keys(sim).length) master.sim = sim;
+  }
+
+  return master;
+};
+
+// Validates the master payload against the model's vocabularies before it
+// reaches Mongoose, so a bad value comes back as a readable 400 rather than a
+// generic cast error.
+const validateDeviceMaster = (master) => {
+  if (master.lifecycleStatus && !DEVICE_LIFECYCLE_STATUSES.includes(master.lifecycleStatus)) {
+    return `Status must be one of: ${DEVICE_LIFECYCLE_STATUSES.join(', ')}`;
+  }
+  if (master.imei && !/^\d{15,17}$/.test(master.imei)) {
+    return 'IMEI must be 15-17 digits';
+  }
+  return null;
+};
+
+// A device is fitted to at most one truck and a truck carries at most one
+// device, so pointing a device at a vehicle means clearing whatever either
+// side used to point at. Both sides are written here — Device.vehicle and
+// Truck.device — so the two can never disagree. Returns an error message, or
+// null on success; the caller still has to save the device.
+const linkDeviceToVehicle = async (device, vehicleId) => {
+  const previous = device.vehicle ? String(device.vehicle) : null;
+  const next = vehicleId ? String(vehicleId) : null;
+  if (previous === next) return null;
+
+  if (next) {
+    const truck = await Truck.findById(next);
+    if (!truck) return 'Vehicle not found';
+    // A truck belonging to a different client would put the device on a fleet
+    // its owner cannot see, so the pairing has to stay inside one account.
+    if (device.owner && String(truck.owner) !== String(device.owner)) {
+      return 'That vehicle belongs to a different client';
+    }
+    // Free the truck's previous device, and the device's previous truck.
+    if (truck.device && String(truck.device) !== String(device._id)) {
+      await Device.updateOne({ _id: truck.device }, { $set: { vehicle: null } });
+    }
+    await Truck.updateOne({ _id: next }, { $set: { device: device._id } });
+  }
+
+  if (previous && previous !== next) {
+    await Truck.updateOne({ _id: previous, device: device._id }, { $set: { device: null } });
+  }
+
+  device.vehicle = next;
+  return null;
+};
+
 // POST /api/admin/devices — register a tracking device (phone or hardware) on
 // behalf of a chosen client. Same gateway-registration flow as a client's own
-// POST /api/track/devices, just with an explicit owner instead of the caller.
+// POST /api/track/devices, just with an explicit owner instead of the caller,
+// plus the device-master fields the client-side form does not collect.
 router.post('/devices', async (req, res) => {
   try {
     const { owner } = req.body || {};
@@ -257,12 +343,24 @@ router.post('/devices', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Client not found' });
     }
 
+    const master = readDeviceMaster(req.body);
+    const invalid = validateDeviceMaster(master);
+    if (invalid) return res.status(400).json({ success: false, error: invalid });
+
     const { device, setup } = await registerDevice({
       name: req.body.name,
       type: req.body.type,
       uniqueId: req.body.uniqueId,
-      ownerId: owner
+      ownerId: owner,
+      master
     });
+
+    // Fitment is linked after creation, since it writes the truck side too.
+    if (req.body.vehicle) {
+      const linkError = await linkDeviceToVehicle(device, req.body.vehicle);
+      if (linkError) return res.status(400).json({ success: false, error: linkError });
+      await device.save();
+    }
 
     res.status(201).json({
       success: true,
@@ -279,16 +377,104 @@ router.post('/devices', async (req, res) => {
   }
 });
 
-// GET /api/admin/devices — every tracked device across every client, owner attached.
-// Powers the global live-tracking map.
+// GET /api/admin/devices — every tracked device across every client, owner and
+// fitted vehicle attached. Powers both the global live-tracking map and the
+// device master table.
 router.get('/devices', async (req, res) => {
   try {
     const devices = await Device.find()
       .populate('owner', 'name company email')
+      .populate('vehicle', 'number model')
       .sort({ lastSeenAt: -1 });
     res.json({ success: true, devices });
   } catch (error) {
     res.status(500).json({ success: false, error: 'Failed to fetch devices' });
+  }
+});
+
+// GET /api/admin/devices/options — the master's vocabularies, so the frontend
+// dropdowns are fed from the same lists the model validates against. Declared
+// before /devices/:id so "options" is not read as an id.
+router.get('/devices/options', (req, res) => {
+  res.json({
+    success: true,
+    options: {
+      deviceTypes: DEVICE_TYPES,
+      lifecycleStatuses: DEVICE_LIFECYCLE_STATUSES
+    }
+  });
+});
+
+// PUT /api/admin/devices/:id — edit one device's master record. The gateway
+// identity (uniqueId) is not editable: it is baked into the hardware and known
+// to Traccar, so changing it here would silently orphan the device's feed.
+router.put('/devices/:id', async (req, res) => {
+  try {
+    const device = await Device.findById(req.params.id);
+    if (!device) return res.status(404).json({ success: false, error: 'Device not found' });
+
+    const master = readDeviceMaster(req.body);
+    const invalid = validateDeviceMaster(master);
+    if (invalid) return res.status(400).json({ success: false, error: invalid });
+
+    if (req.body.name !== undefined) {
+      const name = String(req.body.name).trim();
+      if (!name) return res.status(400).json({ success: false, error: 'Device name is required' });
+      device.name = name;
+    }
+
+    if (req.body.owner !== undefined) {
+      const ownerId = req.body.owner || null;
+      if (ownerId) {
+        const ownerUser = await User.findOne({ _id: ownerId, role: ROLES.COMPANY_ADMIN });
+        if (!ownerUser) return res.status(404).json({ success: false, error: 'Client not found' });
+      }
+      // Moving a device to another client would leave it fitted to a truck that
+      // client does not own, so the fitment is dropped along with the transfer.
+      if (String(device.owner || '') !== String(ownerId || '')) {
+        await linkDeviceToVehicle(device, null);
+      }
+      device.owner = ownerId;
+    }
+
+    // SIM is a subdocument: merge the submitted keys instead of replacing the
+    // whole thing, so a form that omits the ICCID does not wipe it.
+    const { sim, ...flat } = master;
+    Object.assign(device, flat);
+    if (sim) Object.assign(device.sim, sim);
+
+    if (req.body.vehicle !== undefined) {
+      const linkError = await linkDeviceToVehicle(device, req.body.vehicle || null);
+      if (linkError) return res.status(400).json({ success: false, error: linkError });
+    }
+
+    await device.save();
+    const saved = await Device.findById(device._id)
+      .populate('owner', 'name company email')
+      .populate('vehicle', 'number model');
+
+    res.json({ success: true, message: 'Device updated', device: saved });
+  } catch (error) {
+    console.error('[admin] device update failed:', error.message);
+    res.status(500).json({ success: false, error: 'Failed to update device' });
+  }
+});
+
+// DELETE /api/admin/devices/:id — remove a device from the master. The truck it
+// was fitted to is unlinked so it does not keep a dangling ref; the recorded
+// positions are left alone, since retiring a unit should not erase the history
+// of where the vehicle actually went.
+router.delete('/devices/:id', async (req, res) => {
+  try {
+    const device = await Device.findById(req.params.id);
+    if (!device) return res.status(404).json({ success: false, error: 'Device not found' });
+
+    await Truck.updateMany({ device: device._id }, { $set: { device: null } });
+    await device.deleteOne();
+
+    res.json({ success: true, message: 'Device removed' });
+  } catch (error) {
+    res.status(500).json({ success: false, error: 'Failed to delete device' });
   }
 });
 
