@@ -4,7 +4,10 @@ import Driver from '../models/Driver.js';
 import VehicleDocument from '../models/VehicleDocument.js';
 import DriverDocument from '../models/DriverDocument.js';
 import Notification from '../models/Notification.js';
+import Device from '../models/Device.js';
+import Trip from '../models/Trip.js';
 import { protect, requirePermission } from '../middleware/auth.js';
+import { hasPermission } from '../utils/permissions.js';
 import { readDriverList, syncTruckDrivers, attachDrivers } from '../utils/drivers.js';
 
 const router = express.Router();
@@ -76,6 +79,98 @@ router.get('/options', protect, requirePermission('trucks', 'read'), (req, res) 
       statuses: VEHICLE_STATUSES
     }
   });
+});
+
+// The window after which a device that has stopped reporting counts as
+// offline. Matches Device.status's own virtual and the notification
+// synthesizer, so the dashboard tile, the map badge and the bell cannot
+// disagree about which vehicles are live.
+const OFFLINE_AFTER_MS = 2 * 60 * 1000;
+
+// GET /api/trucks/fleet-summary — the headline fleet numbers for the dashboard
+// strip: how many vehicles exist, how many are reporting, how many trips are
+// running, how many vehicles are off the road, and how many alerts are open.
+//
+// Computed server-side rather than in the browser because the pieces live in
+// four collections and the client would otherwise need four round trips (and
+// the tracking/trips grants to make them) just to render five numbers. The
+// counts a caller cannot see degrade to zero rather than failing the request —
+// an Accountant has no tracking grant, and the tile should read 0 online, not
+// blank the whole dashboard.
+router.get('/fleet-summary', protect, requirePermission('trucks', 'read'), async (req, res) => {
+  try {
+    const owner = req.accountId;
+    const canSeeTracking = hasPermission(req.user.role, 'tracking', 'read');
+    const canSeeTrips = hasPermission(req.user.role, 'trips', 'read');
+
+    const [trucks, devices, activeTrips, alerts] = await Promise.all([
+      Truck.find({ owner }).select('status device'),
+      // Only units actually fitted to a vehicle count towards online/offline. A
+      // box still in stock or already retired has no vehicle to report for, and
+      // counting it would inflate the offline number with hardware that was
+      // never on the road in the first place.
+      canSeeTracking
+        ? Device.find({
+            owner,
+            vehicle: { $ne: null },
+            lifecycleStatus: { $nin: ['In Stock', 'Retired'] }
+          }).select('lastSeenAt lastPosition.speed')
+        : [],
+      canSeeTrips ? Trip.countDocuments({ owner, status: 'active' }) : 0,
+      Notification.countDocuments({ owner, type: 'alert', read: false })
+    ]);
+
+    // Seeded from the model's status list so a newly added status shows up as a
+    // zero bucket instead of going missing until a truck first uses it.
+    const byStatus = trucks.reduce(
+      (acc, t) => {
+        acc[t.status] = (acc[t.status] || 0) + 1;
+        return acc;
+      },
+      Object.fromEntries(VEHICLE_STATUSES.map((s) => [s, 0]))
+    );
+
+    const now = Date.now();
+    const telemetry = devices.reduce(
+      (acc, d) => {
+        const staleMs = d.lastSeenAt ? now - new Date(d.lastSeenAt).getTime() : Infinity;
+        if (staleMs > OFFLINE_AFTER_MS) acc.offline += 1;
+        else if ((d.lastPosition?.speed || 0) > 3) acc.moving += 1;
+        else acc.idle += 1;
+        return acc;
+      },
+      { moving: 0, idle: 0, offline: 0 }
+    );
+
+    // "Online" is any fitted device still reporting, whether it is rolling or
+    // parked with the engine off — the question the tile answers is whether we
+    // still have contact with the vehicle, not whether it is moving.
+    const online = telemetry.moving + telemetry.idle;
+
+    res.json({
+      success: true,
+      summary: {
+        totalVehicles: trucks.length,
+        // Vehicles with no tracker fitted are neither online nor offline; they
+        // are reported separately so a paperwork-only truck is not counted as a
+        // dead device. Derived from the truck's own `device` link rather than
+        // by subtracting the device count, which would go wrong the moment a
+        // unit is fitted to a vehicle another seat cannot see.
+        online,
+        offline: telemetry.offline,
+        untracked: trucks.filter((t) => !t.device).length,
+        moving: telemetry.moving,
+        idle: telemetry.idle,
+        activeTrips,
+        maintenance: byStatus.Maintenance || 0,
+        alerts,
+        byStatus
+      }
+    });
+  } catch (error) {
+    console.error('[trucks] fleet summary failed:', error.message);
+    res.status(500).json({ success: false, error: 'Failed to load fleet summary' });
+  }
 });
 
 // GET /api/trucks — the caller's trucks, newest first, each with its drivers.
