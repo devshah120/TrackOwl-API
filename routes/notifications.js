@@ -2,7 +2,10 @@ import express from 'express';
 import Notification from '../models/Notification.js';
 import Truck from '../models/Truck.js';
 import Device from '../models/Device.js';
+import VehicleDocument, { VEHICLE_DOCUMENT_LABELS } from '../models/VehicleDocument.js';
+import DriverDocument, { DRIVER_DOCUMENT_LABELS } from '../models/DriverDocument.js';
 import { protect } from '../middleware/auth.js';
+import { EXPIRY_WARN_DAYS } from '../utils/vehicleDocuments.js';
 
 const router = express.Router();
 
@@ -47,6 +50,76 @@ const synthesizeNotifications = async (req) => {
         // Re-derived daily so an expired truck's alert eventually flips from
         // "expiring soon" to "expired" instead of freezing on the first message.
         dedupeKey: `insurance:${truck._id}:${expired ? 'expired' : 'soon'}`
+      });
+    })
+  );
+
+  // --- Vehicle and driver paperwork ---------------------------------------
+  // The document collections carry the statutory expiries (RC, insurance, PUC,
+  // fitness, permit, tax) and the driver ones (licence, training, medical).
+  // Only documents that actually carry an expiry are scanned — an RC or an
+  // identity proof without one is not overdue, it simply never lapses.
+  const dueBefore = new Date(now + EXPIRY_WARN_DAYS * day);
+
+  const vehicleDocs = await VehicleDocument.find({
+    ...ownedBy(req),
+    expiryDate: { $ne: null, $lte: dueBefore }
+  })
+    .select('docType documentNumber expiryDate truck')
+    .populate('truck', 'number');
+
+  await Promise.all(
+    vehicleDocs.map((doc) => {
+      const daysLeft = Math.ceil((doc.expiryDate.getTime() - now) / day);
+      const expired = daysLeft < 0;
+      const label = VEHICLE_DOCUMENT_LABELS[doc.docType] || doc.docType;
+      // A document whose truck has since been deleted should not raise an alert
+      // nobody can act on; the cascade normally removes these, so this only
+      // catches records orphaned by an older delete.
+      if (!doc.truck) return null;
+
+      return upsertNotification(owner, {
+        type: 'alert',
+        severity: expired ? 'critical' : 'warning',
+        title: expired ? `${label} Expired` : `${label} Expiring Soon`,
+        message: expired
+          ? `${label} for truck ${doc.truck.number} expired ${Math.abs(daysLeft)} day(s) ago`
+          : `${label} for truck ${doc.truck.number} expires in ${daysLeft} day(s)`,
+        vehicle: doc.truck.number,
+        // Keyed on the document rather than the truck, so a vehicle with an
+        // expiring PUC *and* an expired permit raises both. Re-derived across
+        // the expired boundary for the same reason the insurance alert is: the
+        // message has to flip from "expiring" to "expired" rather than freeze.
+        dedupeKey: `vehicle-doc:${doc._id}:${expired ? 'expired' : 'soon'}`
+      });
+    })
+  );
+
+  const driverDocs = await DriverDocument.find({
+    ...ownedBy(req),
+    expiryDate: { $ne: null, $lte: dueBefore }
+  })
+    .select('docType documentNumber expiryDate driver')
+    .populate('driver', 'name');
+
+  await Promise.all(
+    driverDocs.map((doc) => {
+      const daysLeft = Math.ceil((doc.expiryDate.getTime() - now) / day);
+      const expired = daysLeft < 0;
+      const label = DRIVER_DOCUMENT_LABELS[doc.docType] || doc.docType;
+      if (!doc.driver) return null;
+
+      return upsertNotification(owner, {
+        type: 'alert',
+        severity: expired ? 'critical' : 'warning',
+        title: expired ? `${label} Expired` : `${label} Expiring Soon`,
+        message: expired
+          ? `${label} for ${doc.driver.name} expired ${Math.abs(daysLeft)} day(s) ago`
+          : `${label} for ${doc.driver.name} expires in ${daysLeft} day(s)`,
+        // `vehicle` is the bell's subject line; for a driver document the
+        // person is the subject, so their name goes there.
+        vehicle: doc.driver.name,
+        dedupeKey: `driver-doc:${doc._id}:${expired ? 'expired' : 'soon'}`
       });
     })
   );

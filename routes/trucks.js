@@ -1,6 +1,8 @@
 import express from 'express';
 import Truck, { VEHICLE_TYPES, FUEL_TYPES, BODY_TYPES, VEHICLE_STATUSES } from '../models/Truck.js';
 import Driver from '../models/Driver.js';
+import VehicleDocument from '../models/VehicleDocument.js';
+import DriverDocument from '../models/DriverDocument.js';
 import Notification from '../models/Notification.js';
 import { protect, requirePermission } from '../middleware/auth.js';
 import { readDriverList, syncTruckDrivers, attachDrivers } from '../utils/drivers.js';
@@ -179,7 +181,19 @@ router.delete('/:id', protect, requirePermission('trucks', 'delete'), async (req
     const truck = await Truck.findOneAndDelete({ _id: req.params.id, ...ownedBy(req) });
     if (!truck) return res.status(404).json({ success: false, error: 'Truck not found' });
 
+    // The drivers go with the truck, so their paperwork has to be collected
+    // before they are deleted — afterwards there is nothing left to look them
+    // up by.
+    const driverIds = (await Driver.find({ truck: truck._id, ...ownedBy(req) }).select('_id'))
+      .map((d) => d._id);
+
     await Driver.deleteMany({ truck: truck._id, ...ownedBy(req) });
+    // The vehicle's own paperwork goes with it — an RC or permit for a truck
+    // that no longer exists is only noise in the expiry alerts.
+    await VehicleDocument.deleteMany({ truck: truck._id, ...ownedBy(req) });
+    if (driverIds.length) {
+      await DriverDocument.deleteMany({ driver: { $in: driverIds }, ...ownedBy(req) });
+    }
 
     res.json({ success: true, message: 'Truck removed' });
   } catch (error) {

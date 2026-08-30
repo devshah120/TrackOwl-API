@@ -1,4 +1,5 @@
 import Driver, { DRIVER_STATUSES } from '../models/Driver.js';
+import DriverDocument from '../models/DriverDocument.js';
 
 // Shared driver helpers. Trucks are saved with their full driver list in one
 // form submit (AddNewTruck / the admin modal), while /api/drivers edits one
@@ -97,11 +98,17 @@ export const syncTruckDrivers = async (truckId, ownerId, list, rawSource = []) =
     .filter(Boolean)
     .map(String);
 
-  await Driver.deleteMany({
-    truck: truckId,
-    owner: ownerId,
-    ...(keptIds.length ? { _id: { $nin: keptIds } } : {})
-  });
+  const dropped = { truck: truckId, owner: ownerId, ...(keptIds.length ? { _id: { $nin: keptIds } } : {}) };
+
+  // Collect the ids before the delete: afterwards there is nothing left to look
+  // their paperwork up by, and a licence expiry for a driver removed from the
+  // truck form would otherwise keep raising alerts nobody can act on.
+  const droppedIds = (await Driver.find(dropped).select('_id')).map((d) => d._id);
+
+  await Driver.deleteMany(dropped);
+  if (droppedIds.length) {
+    await DriverDocument.deleteMany({ driver: { $in: droppedIds }, owner: ownerId });
+  }
 
   await Promise.all(
     list.map((fields, i) => {

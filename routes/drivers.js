@@ -1,6 +1,7 @@
 import express from 'express';
 import Driver, { DRIVER_STATUSES } from '../models/Driver.js';
 import Truck from '../models/Truck.js';
+import DriverDocument from '../models/DriverDocument.js';
 import { protect, requirePermission } from '../middleware/auth.js';
 import { normaliseDriver } from '../utils/drivers.js';
 
@@ -125,6 +126,10 @@ router.delete('/:id', protect, requirePermission('drivers', 'delete'), async (re
   try {
     const driver = await Driver.findOneAndDelete({ _id: req.params.id, ...ownedBy(req) });
     if (!driver) return res.status(404).json({ success: false, error: 'Driver not found' });
+
+    // Their paperwork goes with them — a licence expiry for someone no longer
+    // on the roster would keep raising alerts nobody can act on.
+    await DriverDocument.deleteMany({ driver: driver._id, ...ownedBy(req) });
 
     // Removing the primary leaves the truck without one; promote the oldest
     // remaining driver so single-driver views keep showing something.
