@@ -3,6 +3,7 @@ import LedgerEntry from '../models/LedgerEntry.js';
 import Truck from '../models/Truck.js';
 import Driver from '../models/Driver.js';
 import { protect, requirePermission } from '../middleware/auth.js';
+import { auditCreate, auditUpdate, auditDelete } from '../utils/audit.js';
 
 const router = express.Router();
 
@@ -68,6 +69,12 @@ const validateLinks = async (req, fields) => {
   return null;
 };
 
+// How a ledger entry names itself in the audit trail: the money and what it was
+// for, which is what someone scanning the log is looking for. Falls back to the
+// category when there is no description.
+const ledgerLabel = (entry) =>
+  `₹${Number(entry.amount || 0).toLocaleString('en-IN')} ${entry.description || entry.category || ''}`.trim();
+
 // The ledger list and detail views show the truck number and driver name, so
 // both refs are resolved on the way out.
 const withLinks = (query) =>
@@ -119,6 +126,9 @@ router.post('/', protect, requirePermission('ledger', 'create'), async (req, res
     const entry = await withLinks(
       LedgerEntry.findById(created._id).select('-receipt.dataUrl')
     );
+
+    await auditCreate(req, { entity: 'ledger_entry', doc: created, label: ledgerLabel(created) });
+
     res.status(201).json({ success: true, entry });
   } catch (error) {
     console.error('[ledger] create failed:', error.message);
@@ -134,6 +144,13 @@ router.put('/:id', protect, requirePermission('ledger', 'update'), async (req, r
     const invalid = await validateLinks(req, fields);
     if (invalid) return res.status(400).json({ success: false, error: invalid });
 
+    // Without the receipt blob — the diff only ever reports whether one is
+    // attached, so pulling megabytes of base64 back just to compare would be
+    // wasted work.
+    const before = await LedgerEntry.findOne({ _id: req.params.id, ...ownedBy(req) })
+      .select('-receipt.dataUrl');
+    if (!before) return res.status(404).json({ success: false, error: 'Ledger entry not found' });
+
     const entry = await withLinks(
       LedgerEntry.findOneAndUpdate(
         { _id: req.params.id, ...ownedBy(req) },
@@ -142,6 +159,15 @@ router.put('/:id', protect, requirePermission('ledger', 'update'), async (req, r
       )
     );
     if (!entry) return res.status(404).json({ success: false, error: 'Ledger entry not found' });
+
+    await auditUpdate(req, {
+      entity: 'ledger_entry',
+      before,
+      after: entry,
+      fields,
+      label: ledgerLabel(entry)
+    });
+
     res.json({ success: true, entry });
   } catch (error) {
     console.error('[ledger] update failed:', error.message);
@@ -152,8 +178,14 @@ router.put('/:id', protect, requirePermission('ledger', 'update'), async (req, r
 // DELETE /api/ledger/:id — remove one of the caller's entries.
 router.delete('/:id', protect, requirePermission('ledger', 'delete'), async (req, res) => {
   try {
-    const entry = await LedgerEntry.findOneAndDelete({ _id: req.params.id, ...ownedBy(req) });
+    const entry = await LedgerEntry.findOneAndDelete(
+      { _id: req.params.id, ...ownedBy(req) },
+      { projection: '-receipt.dataUrl' }
+    );
     if (!entry) return res.status(404).json({ success: false, error: 'Ledger entry not found' });
+
+    await auditDelete(req, { entity: 'ledger_entry', doc: entry, label: ledgerLabel(entry) });
+
     res.json({ success: true, message: 'Ledger entry removed' });
   } catch (error) {
     res.status(500).json({ success: false, error: 'Failed to delete ledger entry' });

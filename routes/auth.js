@@ -5,6 +5,7 @@ import { validateEmail, validatePassword, validateMobile } from '../utils/valida
 import { protect } from '../middleware/auth.js';
 import { ROLES } from '../utils/permissions.js';
 import { sendOTPEmail } from '../services/emailService.js';
+import { recordAudit } from '../utils/audit.js';
 
 const router = express.Router();
 
@@ -21,6 +22,26 @@ const generateOTP = () => {
 
 // Store OTPs in memory (use Redis in production)
 const otpStore = new Map();
+
+// The audit trail's view of a sign-in attempt. `protect` has not run on these
+// routes, so there is no req.user or req.accountId to read — the actor and the
+// account are passed explicitly instead.
+//
+// A failed attempt for an unknown email has no account to file under and lands
+// with account: null, where only the platform-wide admin view will see it. That
+// is the right place for it: it is not an event in any customer's account, and
+// filing a guess at an email address under whichever account matched would
+// leak whether that address exists.
+const auditAuth = (req, action, user, summary) =>
+  recordAudit(req, {
+    entity: 'auth',
+    entityId: user?._id || null,
+    entityLabel: user?.name || '',
+    action,
+    account: user ? user.account || user._id : null,
+    actor: user || null,
+    summary
+  });
 
 // Register new user
 router.post('/register', async (req, res) => {
@@ -80,6 +101,23 @@ router.post('/register', async (req, res) => {
 
     const token = generateToken(user._id);
 
+    // The opening entry of this account's trail: it is its own actor, since
+    // nobody else was involved in creating it.
+    await recordAudit(req, {
+      entity: 'user',
+      entityId: user._id,
+      entityLabel: user.name,
+      action: 'create',
+      account: user._id,
+      actor: user,
+      summary: `Account created for ${user.company || user.name}`,
+      changes: [
+        { field: 'name', label: 'Name', from: null, to: user.name },
+        { field: 'email', label: 'Email', from: null, to: user.email },
+        { field: 'company', label: 'Company', from: null, to: user.company }
+      ]
+    });
+
     res.status(201).json({
       success: true,
       message: 'Account created successfully',
@@ -119,6 +157,10 @@ router.post('/login', async (req, res) => {
     const user = await User.findOne({ email: email.toLowerCase() }).select('+password');
 
     if (!user) {
+      // No account behind it, so this is recorded platform-wide only. The
+      // attempted address goes in the summary — repeated attempts against one
+      // address is the pattern this exists to make visible.
+      await auditAuth(req, 'login_failed', null, `Failed sign-in for unknown email ${String(email).toLowerCase()}`);
       return res.status(401).json({
         success: false,
         error: 'Invalid credentials'
@@ -128,6 +170,7 @@ router.post('/login', async (req, res) => {
     // Check password
     const isPasswordValid = await user.matchPassword(password);
     if (!isPasswordValid) {
+      await auditAuth(req, 'login_failed', user, `Failed sign-in for ${user.email} — wrong password`);
       return res.status(401).json({
         success: false,
         error: 'Invalid credentials'
@@ -136,6 +179,7 @@ router.post('/login', async (req, res) => {
 
     // Check if user is active
     if (!user.isActive) {
+      await auditAuth(req, 'login_failed', user, `Sign-in blocked for ${user.email} — account inactive`);
       return res.status(403).json({
         success: false,
         error: 'Account is inactive'
@@ -147,6 +191,7 @@ router.post('/login', async (req, res) => {
     if (user.account) {
       const owner = await User.findById(user.account).select('isActive');
       if (!owner || !owner.isActive) {
+        await auditAuth(req, 'login_failed', user, `Sign-in blocked for ${user.email} — company account inactive`);
         return res.status(403).json({
           success: false,
           error: 'Account is inactive'
@@ -159,6 +204,8 @@ router.post('/login', async (req, res) => {
     await user.updateOne({ $set: { lastLoginAt: user.lastLoginAt } });
 
     const token = generateToken(user._id);
+
+    await auditAuth(req, 'login', user, `${user.name} signed in`);
 
     res.json({
       success: true,
@@ -368,6 +415,10 @@ router.post('/reset-password', async (req, res) => {
 
     user.password = newPassword;
     await user.save();
+
+    // The user reset their own password through the forgot-password flow, so
+    // they are the actor even though no session existed at the time.
+    await auditAuth(req, 'password_change', user, `${user.name} reset their password via email OTP`);
 
     res.json({
       success: true,

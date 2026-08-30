@@ -9,6 +9,7 @@ import Trip from '../models/Trip.js';
 import { protect, requirePermission } from '../middleware/auth.js';
 import { hasPermission } from '../utils/permissions.js';
 import { readDriverList, syncTruckDrivers, attachDrivers } from '../utils/drivers.js';
+import { auditCreate, auditUpdate, auditDelete } from '../utils/audit.js';
 
 const router = express.Router();
 
@@ -224,6 +225,8 @@ router.post('/', protect, requirePermission('trucks', 'create'), async (req, res
       vehicle: truck.number
     }).catch((err) => console.error('[trucks] notification failed:', err.message));
 
+    await auditCreate(req, { entity: 'truck', doc: truck, label: truck.number });
+
     res.status(201).json({ success: true, truck: saved });
   } catch (error) {
     console.error('[trucks] create failed:', error.message);
@@ -237,18 +240,19 @@ router.put('/:id', protect, requirePermission('trucks', 'update'), async (req, r
     const body = req.body || {};
     const fields = buildTruckFields(body);
 
+    // Read once, before the write: this is both the odometer guard's reference
+    // point and the "old value" side of the audit diff.
+    const before = await Truck.findOne({ _id: req.params.id, ...ownedBy(req) });
+    if (!before) return res.status(404).json({ success: false, error: 'Truck not found' });
+
     // An odometer only ever climbs. A lower reading is a typo far more often
     // than a genuine correction, and silently accepting it would understate
     // every distance derived from it, so it is rejected rather than clamped.
-    if (fields.odometer !== undefined) {
-      const current = await Truck.findOne({ _id: req.params.id, ...ownedBy(req) }).select('odometer');
-      if (!current) return res.status(404).json({ success: false, error: 'Truck not found' });
-      if (fields.odometer < (current.odometer || 0)) {
-        return res.status(400).json({
-          success: false,
-          error: `Odometer cannot go backwards (current reading is ${current.odometer} km)`
-        });
-      }
+    if (fields.odometer !== undefined && fields.odometer < (before.odometer || 0)) {
+      return res.status(400).json({
+        success: false,
+        error: `Odometer cannot go backwards (current reading is ${before.odometer} km)`
+      });
     }
 
     const truck = await Truck.findOneAndUpdate(
@@ -259,6 +263,14 @@ router.put('/:id', protect, requirePermission('trucks', 'update'), async (req, r
     if (!truck) return res.status(404).json({ success: false, error: 'Truck not found' });
 
     await syncTruckDrivers(truck._id, req.accountId, readDriverList(body), rawDriverRows(body));
+
+    await auditUpdate(req, {
+      entity: 'truck',
+      before,
+      after: truck,
+      fields,
+      label: truck.number
+    });
 
     res.json({ success: true, truck: await attachDrivers(truck, req.accountId) });
   } catch (error) {
@@ -289,6 +301,16 @@ router.delete('/:id', protect, requirePermission('trucks', 'delete'), async (req
     if (driverIds.length) {
       await DriverDocument.deleteMany({ driver: { $in: driverIds }, ...ownedBy(req) });
     }
+
+    // Logged after the cascade so the entry reflects what the delete actually
+    // took with it, and notes the collateral — the drivers and paperwork that
+    // went too are not otherwise recoverable from the trail.
+    await auditDelete(req, {
+      entity: 'truck',
+      doc: truck,
+      label: truck.number,
+      summary: `Truck ${truck.number} deleted${driverIds.length ? ` along with ${driverIds.length} driver${driverIds.length > 1 ? 's' : ''} and their documents` : ''}`
+    });
 
     res.json({ success: true, message: 'Truck removed' });
   } catch (error) {

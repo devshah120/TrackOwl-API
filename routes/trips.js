@@ -7,8 +7,14 @@ import { protect, requirePermission } from '../middleware/auth.js';
 import { sendTripCreatedEmail, sendTripCompletedEmail } from '../services/emailService.js';
 import { detectStops } from '../utils/tripStops.js';
 import { describePoints } from '../services/placeLookup.js';
+import { auditCreate, auditUpdate, auditDelete } from '../utils/audit.js';
 
 const router = express.Router();
+
+// How a trip names itself in the audit trail — the journey, not its id, which
+// is what makes a log line readable at a glance.
+const tripLabel = (trip) =>
+  `${trip?.origin?.name || 'Unknown'} → ${trip?.destination?.name || 'Unknown'}`;
 
 // Upper bound on GPS fixes returned for one trip's actual-path trail. A device
 // reporting every few seconds over a long haul can accumulate thousands; 2000
@@ -139,6 +145,16 @@ router.post('/', protect, requirePermission('trips', 'create'), async (req, res)
         .catch((err) => console.error('[trips] created email failed:', err.message));
     }
 
+    // The stored polyline is thousands of coordinate pairs — the log records
+    // the journey, not its geometry, so the snapshot is limited to the fields a
+    // person would recognise.
+    await auditCreate(req, {
+      entity: 'trip',
+      doc: trip,
+      label: tripLabel(trip),
+      fields: ['origin', 'destination', 'stops', 'status', 'note', 'distanceKm', 'durationMin', 'device']
+    });
+
     res.status(201).json({ success: true, trip: populated });
   } catch (error) {
     console.error('[trips] create failed:', error.message);
@@ -162,7 +178,10 @@ router.patch('/:id', protect, requirePermission('trips', 'update'), async (req, 
 
     // Read the current status first so we only email on an actual transition
     // into 'completed' — not on every PATCH that re-sends the same status.
-    const existing = await Trip.findOne({ _id: req.params.id, ...ownedBy(req) }).select('status device');
+    // `note` rides along with status and device because this same read is the
+    // "before" side of the audit diff — re-reading the document afterwards
+    // would compare the record against itself.
+    const existing = await Trip.findOne({ _id: req.params.id, ...ownedBy(req) }).select('status device note');
     if (!existing) return res.status(404).json({ success: false, error: 'Trip not found' });
 
     // Prevent starting a trip when another trip on the same device is already
@@ -205,6 +224,17 @@ router.patch('/:id', protect, requirePermission('trips', 'update'), async (req, 
       sendTripCompletedEmail(req.user.email, req.user.name, trip, trip.device?.name)
         .catch((err) => console.error('[trips] completed email failed:', err.message));
     }
+
+    // startedAt/completedAt are stamped by this handler rather than sent by the
+    // client, so they are excluded from the diff: they are a consequence of the
+    // status change already being logged, not a separate edit.
+    await auditUpdate(req, {
+      entity: 'trip',
+      before: existing,
+      after: trip,
+      fields: { status: updates.status, note: updates.note },
+      label: tripLabel(trip)
+    });
 
     res.json({ success: true, trip });
   } catch (error) {
@@ -390,6 +420,14 @@ router.delete('/:id', protect, requirePermission('trips', 'delete'), async (req,
   try {
     const trip = await Trip.findOneAndDelete({ _id: req.params.id, ...ownedBy(req) });
     if (!trip) return res.status(404).json({ success: false, error: 'Trip not found' });
+
+    await auditDelete(req, {
+      entity: 'trip',
+      doc: trip,
+      label: tripLabel(trip),
+      fields: ['origin', 'destination', 'stops', 'status', 'note', 'distanceKm', 'durationMin', 'device']
+    });
+
     res.json({ success: true, message: 'Trip removed' });
   } catch (error) {
     res.status(500).json({ success: false, error: 'Failed to delete trip' });

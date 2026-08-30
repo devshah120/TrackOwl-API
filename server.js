@@ -21,6 +21,7 @@ import adminRoutes from './routes/admin.js';
 import geoRoutes from './routes/geo.js';
 import historyRoutes from './routes/history.js';
 import companyRoutes from './routes/companies.js';
+import auditRoutes from './routes/audit.js';
 import { initRolePermissions } from './services/rolePermissions.js';
 
 dotenv.config();
@@ -83,6 +84,7 @@ app.use('/api/history', historyRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/geo', geoRoutes);
 app.use('/api/companies', companyRoutes);
+app.use('/api/audit', auditRoutes);
 
 // Public tracking page. The token is validated by /api/track/public/:token,
 // which the page itself calls — this only serves the map shell.

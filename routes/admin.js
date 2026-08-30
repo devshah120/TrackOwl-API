@@ -22,6 +22,8 @@ import {
 import { loadRolePermissions } from '../services/rolePermissions.js';
 import { registerDevice } from '../services/deviceRegistration.js';
 import { readDriverList, syncTruckDrivers, attachDrivers } from '../utils/drivers.js';
+import { recordAudit, auditCreate, auditUpdate, auditDelete } from '../utils/audit.js';
+import { listEntries } from './audit.js';
 
 // Drivers are owned by the truck's client, not by the admin making the call.
 const rawDriverRows = (body) =>
@@ -32,6 +34,13 @@ const router = express.Router();
 // Every route here is platform-wide (crosses client boundaries), so it is
 // gated to superadmin on top of normal auth.
 router.use(protect, requireSuperAdmin);
+
+// A Super Admin acts *on* a client's account, not inside their own — so these
+// entries are filed against the affected client rather than against req.accountId
+// (which for a platform operator is their own id and belongs to nobody's fleet).
+// The actor stays the admin, which is exactly the pair an audit needs: whose
+// data changed, and who reached in and changed it.
+const onBehalfOf = (accountId) => ({ account: accountId });
 
 // GET /api/admin/users — every client account, with a truck count and a count
 // of the staff seats on it. Only account owners are listed: their team shows as
@@ -77,6 +86,16 @@ router.patch('/users/:id/status', async (req, res) => {
     );
     if (!user) return res.status(404).json({ success: false, error: 'Client not found' });
 
+    await recordAudit(req, {
+      entity: 'user',
+      entityId: user._id,
+      entityLabel: user.name,
+      action: isActive ? 'activate' : 'deactivate',
+      ...onBehalfOf(user._id),
+      summary: `Client account ${user.company || user.name} ${isActive ? 'activated' : 'deactivated'} by platform admin`,
+      changes: [{ field: 'isActive', label: 'Active', from: !isActive, to: isActive }]
+    });
+
     res.json({ success: true, user });
   } catch (error) {
     res.status(500).json({ success: false, error: 'Failed to update client status' });
@@ -94,12 +113,24 @@ router.put('/users/:id', async (req, res) => {
     if (company !== undefined) updates.company = String(company).trim();
     if (fleet !== undefined) updates.fleet = fleet;
 
+    const before = await User.findOne({ _id: req.params.id, role: ROLES.COMPANY_ADMIN });
+    if (!before) return res.status(404).json({ success: false, error: 'Client not found' });
+
     const user = await User.findOneAndUpdate(
       { _id: req.params.id, role: ROLES.COMPANY_ADMIN },
       { $set: updates },
       { new: true, runValidators: true }
     );
     if (!user) return res.status(404).json({ success: false, error: 'Client not found' });
+
+    await auditUpdate(req, {
+      entity: 'user',
+      before,
+      after: user,
+      fields: updates,
+      label: user.name,
+      ...onBehalfOf(user._id)
+    });
 
     res.json({ success: true, user });
   } catch (error) {
@@ -126,6 +157,19 @@ router.delete('/users/:id', async (req, res) => {
       LedgerEntry.deleteMany({ owner: user._id }),
       Notification.deleteMany({ owner: user._id })
     ]);
+
+    // Filed against the platform (account: null) rather than against the client:
+    // the account it would have belonged to no longer exists, and an entry
+    // nobody can ever read is not a record of anything. This is the one deletion
+    // where the platform-wide view is the only place the evidence survives.
+    await auditDelete(req, {
+      entity: 'user',
+      doc: user,
+      label: user.name,
+      fields: ['name', 'email', 'mobile', 'company', 'role'],
+      account: null,
+      summary: `Client account ${user.company || user.name} deleted with all of its trucks, drivers and ledger entries`
+    });
 
     res.json({ success: true, message: 'Client removed' });
   } catch (error) {
@@ -189,6 +233,14 @@ router.post('/trucks', async (req, res) => {
       vehicle: truck.number
     }).catch((err) => console.error('[admin] notification failed:', err.message));
 
+    await auditCreate(req, {
+      entity: 'truck',
+      doc: truck,
+      label: truck.number,
+      ...onBehalfOf(owner),
+      summary: `Truck ${truck.number} created by platform admin`
+    });
+
     res.status(201).json({ success: true, truck: await attachDrivers(truck) });
   } catch (error) {
     console.error('[admin] create truck failed:', error.message);
@@ -208,6 +260,9 @@ router.put('/trucks/:id', async (req, res) => {
     if (body.status !== undefined) fields.status = body.status;
     if (body.currentRoute !== undefined) fields.currentRoute = String(body.currentRoute).trim();
 
+    const before = await Truck.findById(req.params.id);
+    if (!before) return res.status(404).json({ success: false, error: 'Truck not found' });
+
     const truck = await Truck.findByIdAndUpdate(
       req.params.id,
       { $set: fields },
@@ -220,6 +275,15 @@ router.put('/trucks/:id', async (req, res) => {
     // the id off the populated document rather than the field itself.
     const ownerId = truck.owner?._id || truck.owner;
     await syncTruckDrivers(truck._id, ownerId, readDriverList(body), rawDriverRows(body));
+
+    await auditUpdate(req, {
+      entity: 'truck',
+      before,
+      after: truck,
+      fields,
+      label: truck.number,
+      ...onBehalfOf(ownerId)
+    });
 
     res.json({ success: true, truck: await attachDrivers(truck) });
   } catch (error) {
@@ -236,6 +300,15 @@ router.delete('/trucks/:id', async (req, res) => {
   try {
     const truck = await Truck.findByIdAndDelete(req.params.id);
     if (!truck) return res.status(404).json({ success: false, error: 'Truck not found' });
+
+    await auditDelete(req, {
+      entity: 'truck',
+      doc: truck,
+      label: truck.number,
+      ...onBehalfOf(truck.owner),
+      summary: `Truck ${truck.number} deleted by platform admin`
+    });
+
     res.json({ success: true, message: 'Truck removed' });
   } catch (error) {
     res.status(500).json({ success: false, error: 'Failed to delete truck' });
@@ -362,6 +435,15 @@ router.post('/devices', async (req, res) => {
       await device.save();
     }
 
+    await auditCreate(req, {
+      entity: 'device',
+      doc: device,
+      label: device.name,
+      fields: ['name', 'uniqueId', 'type', 'lifecycleStatus', 'vehicle'],
+      ...onBehalfOf(owner),
+      summary: `Device ${device.name} (${device.uniqueId}) registered for ${ownerUser.company || ownerUser.name} by platform admin`
+    });
+
     res.status(201).json({
       success: true,
       message: `${device.name} registered for ${ownerUser.company}`,
@@ -413,6 +495,10 @@ router.put('/devices/:id', async (req, res) => {
     const device = await Device.findById(req.params.id);
     if (!device) return res.status(404).json({ success: false, error: 'Device not found' });
 
+    // A plain copy taken before the Object.assign below mutates the document —
+    // read afterwards, it would compare the new values against themselves.
+    const before = device.toObject();
+
     const master = readDeviceMaster(req.body);
     const invalid = validateDeviceMaster(master);
     if (invalid) return res.status(400).json({ success: false, error: invalid });
@@ -453,6 +539,18 @@ router.put('/devices/:id', async (req, res) => {
       .populate('owner', 'name company email')
       .populate('vehicle', 'number model');
 
+    await auditUpdate(req, {
+      entity: 'device',
+      before,
+      after: device.toObject(),
+      // Named explicitly rather than diffing the whole document: `master` holds
+      // only the fields the form submits, and `owner`/`vehicle` are handled by
+      // their own branches above.
+      fields: { name: 1, owner: 1, vehicle: 1, lifecycleStatus: 1, type: 1, ...master },
+      label: device.name,
+      ...onBehalfOf(device.owner)
+    });
+
     res.json({ success: true, message: 'Device updated', device: saved });
   } catch (error) {
     console.error('[admin] device update failed:', error.message);
@@ -472,9 +570,42 @@ router.delete('/devices/:id', async (req, res) => {
     await Truck.updateMany({ device: device._id }, { $set: { device: null } });
     await device.deleteOne();
 
+    await auditDelete(req, {
+      entity: 'device',
+      doc: device,
+      label: device.name,
+      fields: ['name', 'uniqueId', 'type', 'lifecycleStatus', 'vehicle'],
+      ...onBehalfOf(device.owner),
+      summary: `Device ${device.name} (${device.uniqueId}) removed from the master by platform admin`
+    });
+
     res.json({ success: true, message: 'Device removed' });
   } catch (error) {
     res.status(500).json({ success: false, error: 'Failed to delete device' });
+  }
+});
+
+// --- Audit trail ---------------------------------------------------------
+// The platform-wide view of the same log every account sees a slice of. Reads
+// across account boundaries, which is why it lives here behind requireSuperAdmin
+// rather than on /api/audit.
+
+// GET /api/admin/audit — every account's activity, newest first, with the same
+// filters the account-level list accepts plus `account` to narrow to one client.
+//
+// The unscoped read is the point: entries that belong to no account — a failed
+// sign-in against an unknown email, a role-matrix edit, a deleted client — exist
+// only here, and they are precisely the ones a platform operator needs.
+router.get('/audit', async (req, res) => {
+  try {
+    const scope = {};
+    if (req.query.account && /^[0-9a-fA-F]{24}$/.test(req.query.account)) {
+      scope.account = req.query.account;
+    }
+    await listEntries(req, res, scope);
+  } catch (error) {
+    console.error('[admin] audit list failed:', error.message);
+    res.status(500).json({ success: false, error: 'Failed to load audit log' });
   }
 });
 
@@ -635,6 +766,10 @@ router.put('/permissions/:role', async (req, res) => {
     }
 
     const deduped = [...new Set(grants)];
+    // What the role could do before this save, for the audit entry's "from"
+    // side. Read through grantsFor so an unstored role reports its shipped
+    // defaults rather than an empty list it never actually had.
+    const previous = grantsFor(role);
 
     const updated = await RolePermission.findOneAndUpdate(
       { role },
@@ -645,6 +780,18 @@ router.put('/permissions/:role', async (req, res) => {
     // The cache is what every request actually reads, so a save that did not
     // refresh it would appear to work and change nothing.
     await loadRolePermissions();
+
+    // The matrix is platform-wide, so this is filed against the platform rather
+    // than any one account — and it is the single highest-value entry in the
+    // trail: it is the change that silently alters what everyone else can do.
+    await recordAudit(req, {
+      entity: 'role_permission',
+      entityId: updated._id,
+      entityLabel: ROLE_LABELS[role] || role,
+      action: 'permission_change',
+      account: null,
+      changes: [{ field: 'grants', label: 'Permissions', from: previous, to: deduped }]
+    });
 
     res.json({
       success: true,
@@ -684,12 +831,21 @@ router.post('/permissions/:role/reset', async (req, res) => {
     }
 
     const defaults = DEFAULT_GRANTS[role] || [];
+    const previous = grantsFor(role);
     await RolePermission.findOneAndUpdate(
       { role },
       { $set: { grants: defaults, updatedBy: req.user._id, updatedAt: new Date() } },
       { new: true, upsert: true, runValidators: true }
     );
     await loadRolePermissions();
+
+    await recordAudit(req, {
+      entity: 'role_permission',
+      entityLabel: ROLE_LABELS[role] || role,
+      action: 'permission_reset',
+      account: null,
+      changes: [{ field: 'grants', label: 'Permissions', from: previous, to: defaults }]
+    });
 
     res.json({
       success: true,

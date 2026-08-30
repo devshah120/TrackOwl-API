@@ -2,6 +2,7 @@ import express from 'express';
 import BillingTrip from '../models/BillingTrip.js';
 import Notification from '../models/Notification.js';
 import { protect, requirePermission } from '../middleware/auth.js';
+import { auditCreate, auditUpdate, auditDelete } from '../utils/audit.js';
 import { streamPdf } from '../utils/pdf.js';
 import { drawLorryReceipt, drawTaxInvoice, drawGoodsDeclaration } from '../utils/documents.js';
 import { profileForDocuments } from '../utils/company.js';
@@ -149,6 +150,12 @@ router.get('/', protect, requirePermission('billing', 'read'), async (req, res) 
   }
 });
 
+// How a billing trip names itself in the trail. The LR number is what the
+// paperwork is filed under, so it leads where there is one; otherwise the party
+// and vehicle identify it.
+const billingLabel = (t) =>
+  t?.lr ? `LR ${t.lr}` : `${t?.partyName || 'Unknown party'} (${t?.truck || '—'})`;
+
 // POST /api/billing-trips — create a billing trip for the caller.
 router.post('/', protect, requirePermission('billing', 'create'), async (req, res) => {
   try {
@@ -167,6 +174,12 @@ router.post('/', protect, requirePermission('billing', 'create'), async (req, re
       vehicle: billingTrip.truck
     }).catch((err) => console.error('[billing] notification failed:', err.message));
 
+    await auditCreate(req, {
+      entity: 'billing_trip',
+      doc: billingTrip,
+      label: billingLabel(billingTrip)
+    });
+
     res.status(201).json({ success: true, billingTrip });
   } catch (error) {
     console.error('[billing] create failed:', error.message);
@@ -178,7 +191,9 @@ router.post('/', protect, requirePermission('billing', 'create'), async (req, re
 router.put('/:id', protect, requirePermission('billing', 'update'), async (req, res) => {
   try {
     const fields = buildBillingFields(req.body || {});
-    const before = await BillingTrip.findOne({ _id: req.params.id, ...ownedBy(req) }).select('status');
+    // The whole record, not just the status: this read is both the paid-transition
+    // check and the "before" side of the audit diff.
+    const before = await BillingTrip.findOne({ _id: req.params.id, ...ownedBy(req) });
     if (!before) return res.status(404).json({ success: false, error: 'Billing trip not found' });
 
     const billingTrip = await BillingTrip.findOneAndUpdate(
@@ -196,6 +211,14 @@ router.put('/:id', protect, requirePermission('billing', 'update'), async (req, 
         vehicle: billingTrip.truck
       }).catch((err) => console.error('[billing] notification failed:', err.message));
     }
+
+    await auditUpdate(req, {
+      entity: 'billing_trip',
+      before,
+      after: billingTrip,
+      fields,
+      label: billingLabel(billingTrip)
+    });
 
     res.json({ success: true, billingTrip });
   } catch (error) {
@@ -245,6 +268,13 @@ router.delete('/:id', protect, requirePermission('billing', 'delete'), async (re
   try {
     const billingTrip = await BillingTrip.findOneAndDelete({ _id: req.params.id, ...ownedBy(req) });
     if (!billingTrip) return res.status(404).json({ success: false, error: 'Billing trip not found' });
+
+    await auditDelete(req, {
+      entity: 'billing_trip',
+      doc: billingTrip,
+      label: billingLabel(billingTrip)
+    });
+
     res.json({ success: true, message: 'Billing trip removed' });
   } catch (error) {
     res.status(500).json({ success: false, error: 'Failed to delete billing trip' });

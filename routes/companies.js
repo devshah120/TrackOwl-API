@@ -1,6 +1,7 @@
 import express from 'express';
 import Company from '../models/Company.js';
 import { protect, requirePermission } from '../middleware/auth.js';
+import { auditCreate, auditUpdate, auditDelete } from '../utils/audit.js';
 import { parseImageDataUrl } from '../utils/images.js';
 
 const router = express.Router();
@@ -126,6 +127,9 @@ router.post('/', protect, requirePermission('company', 'create'), async (req, re
     }
 
     const company = await Company.create({ ...fields, owner: req.accountId });
+
+    await auditCreate(req, { entity: 'company', doc: company, label: company.name });
+
     res.status(201).json({ success: true, company });
   } catch (error) {
     if (error.name === 'ValidationError') {
@@ -149,6 +153,10 @@ router.put('/', protect, requirePermission('company', 'update'), async (req, res
     if (error) return res.status(400).json({ success: false, error });
 
     let company = await Company.findOne(ownedBy(req));
+    // A plain copy of the stored values, taken before the Object.assign below
+    // mutates the document in place — read afterwards, the diff would be
+    // comparing the new values against themselves.
+    const before = company ? company.toObject() : null;
 
     if (!company) {
       if (!fields.name) {
@@ -164,7 +172,23 @@ router.put('/', protect, requirePermission('company', 'update'), async (req, res
       Object.assign(company, fields);
     }
 
+    // Read before save(), which clears the flag — this is what decides whether
+    // the entry is filed as the company being created or edited.
+    const wasNew = company.isNew;
     await company.save();
+
+    if (wasNew) {
+      await auditCreate(req, { entity: 'company', doc: company, label: company.name });
+    } else {
+      await auditUpdate(req, {
+        entity: 'company',
+        before,
+        after: company,
+        fields,
+        label: company.name
+      });
+    }
+
     res.json({ success: true, message: 'Company saved successfully', company });
   } catch (error) {
     if (error.name === 'ValidationError') {
@@ -181,6 +205,9 @@ router.delete('/', protect, requirePermission('company', 'delete'), async (req, 
   try {
     const company = await Company.findOneAndDelete(ownedBy(req));
     if (!company) return res.status(404).json({ success: false, error: 'Company not found' });
+
+    await auditDelete(req, { entity: 'company', doc: company, label: company.name });
+
     res.json({ success: true, message: 'Company removed' });
   } catch (error) {
     console.error('[companies] delete failed:', error.message);

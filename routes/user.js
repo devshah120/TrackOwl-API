@@ -1,6 +1,7 @@
 import express from 'express';
 import User from '../models/User.js';
 import { protect } from '../middleware/auth.js';
+import { recordAudit, auditUpdate } from '../utils/audit.js';
 import { parseImageDataUrl } from '../utils/images.js';
 
 const router = express.Router();
@@ -76,11 +77,23 @@ router.put('/profile', protect, async (req, res) => {
       }
     }
 
+    const before = await User.findById(req.user.id);
+
     const user = await User.findByIdAndUpdate(
       req.user.id,
       updates,
       { new: true, runValidators: true }
     );
+
+    // Filed as `profile` rather than `user`: this is the seat editing itself,
+    // which is a different question from an admin editing someone else's row.
+    await auditUpdate(req, {
+      entity: 'profile',
+      before,
+      after: user,
+      fields: updates,
+      label: user.name
+    });
 
     res.json({
       success: true,
@@ -133,6 +146,13 @@ router.post('/change-password', protect, async (req, res) => {
 
     user.password = newPassword;
     await user.save();
+
+    await recordAudit(req, {
+      entity: 'profile',
+      entityId: user._id,
+      entityLabel: user.name,
+      action: 'password_change'
+    });
 
     res.json({
       success: true,

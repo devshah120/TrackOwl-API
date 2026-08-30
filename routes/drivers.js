@@ -4,6 +4,7 @@ import Truck from '../models/Truck.js';
 import DriverDocument from '../models/DriverDocument.js';
 import { protect, requirePermission } from '../middleware/auth.js';
 import { normaliseDriver } from '../utils/drivers.js';
+import { auditCreate, auditUpdate, auditDelete } from '../utils/audit.js';
 
 const router = express.Router();
 
@@ -75,6 +76,8 @@ router.post('/', protect, requirePermission('drivers', 'create'), async (req, re
     const driver = await Driver.create({ ...fields, truck: truckId, owner: req.accountId });
     if (driver.isPrimary) await demoteSiblings(truckId, req.accountId, driver._id);
 
+    await auditCreate(req, { entity: 'driver', doc: driver, label: driver.name });
+
     res.status(201).json({ success: true, driver });
   } catch (error) {
     if (error.name === 'ValidationError') {
@@ -103,6 +106,9 @@ router.put('/:id', protect, requirePermission('drivers', 'update'), async (req, 
       fields.truck = truckId;
     }
 
+    const before = await Driver.findOne({ _id: req.params.id, ...ownedBy(req) });
+    if (!before) return res.status(404).json({ success: false, error: 'Driver not found' });
+
     const driver = await Driver.findOneAndUpdate(
       { _id: req.params.id, ...ownedBy(req) },
       { $set: fields },
@@ -111,6 +117,8 @@ router.put('/:id', protect, requirePermission('drivers', 'update'), async (req, 
     if (!driver) return res.status(404).json({ success: false, error: 'Driver not found' });
 
     if (driver.isPrimary) await demoteSiblings(driver.truck, req.accountId, driver._id);
+
+    await auditUpdate(req, { entity: 'driver', before, after: driver, fields, label: driver.name });
 
     res.json({ success: true, driver });
   } catch (error) {
@@ -140,6 +148,8 @@ router.delete('/:id', protect, requirePermission('drivers', 'delete'), async (re
         await next.save();
       }
     }
+
+    await auditDelete(req, { entity: 'driver', doc: driver, label: driver.name });
 
     res.json({ success: true, message: 'Driver removed' });
   } catch (error) {

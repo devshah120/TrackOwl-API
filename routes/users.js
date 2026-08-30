@@ -1,6 +1,7 @@
 import express from 'express';
 import User from '../models/User.js';
 import { protect, requirePermission } from '../middleware/auth.js';
+import { recordAudit, auditCreate, auditUpdate, auditDelete } from '../utils/audit.js';
 import { validateEmail, validatePassword, validateMobile } from '../utils/validators.js';
 import {
   ASSIGNABLE_ROLES,
@@ -126,6 +127,16 @@ router.post('/', protect, requirePermission('users', 'create'), async (req, res)
       createdBy: req.user._id
     });
 
+    // The password is never snapshotted — `fields` names exactly what the log
+    // may carry, and the redaction in utils/audit.js is the backstop.
+    await auditCreate(req, {
+      entity: 'user',
+      doc: user,
+      label: user.name,
+      fields: ['name', 'email', 'mobile', 'role', 'isActive'],
+      summary: `${user.name} added as ${ROLE_LABELS[user.role]}`
+    });
+
     res.status(201).json({
       success: true,
       message: `${user.name} added as ${ROLE_LABELS[user.role]}`,
@@ -191,6 +202,9 @@ router.put('/:id', protect, requirePermission('users', 'update'), async (req, re
       updates.role = role;
     }
 
+    const before = await User.findOne({ _id: req.params.id, account: req.accountId });
+    if (!before) return res.status(404).json({ success: false, error: 'User not found' });
+
     const user = await User.findOneAndUpdate(
       { _id: req.params.id, account: req.accountId },
       { $set: updates },
@@ -198,6 +212,20 @@ router.put('/:id', protect, requirePermission('users', 'update'), async (req, re
     );
 
     if (!user) return res.status(404).json({ success: false, error: 'User not found' });
+
+    // A role change is the entry an audit actually gets read for, so it is
+    // called out in the summary rather than left as one field among several.
+    const roleChanged = updates.role && updates.role !== before.role;
+    await auditUpdate(req, {
+      entity: 'user',
+      before,
+      after: user,
+      fields: updates,
+      label: user.name,
+      summary: roleChanged
+        ? `${user.name} changed from ${ROLE_LABELS[before.role] || before.role} to ${ROLE_LABELS[user.role] || user.role}`
+        : undefined
+    });
 
     res.json({ success: true, message: 'User updated', user: user.toJSON() });
   } catch (error) {
@@ -237,6 +265,17 @@ router.patch('/:id/status', protect, requirePermission('users', 'update'), async
 
     if (!user) return res.status(404).json({ success: false, error: 'User not found' });
 
+    // Logged as activate/deactivate rather than as an `update` with one boolean
+    // field: revoking someone's access is its own event, and an auditor filters
+    // for it by name.
+    await recordAudit(req, {
+      entity: 'user',
+      entityId: user._id,
+      entityLabel: user.name,
+      action: isActive ? 'activate' : 'deactivate',
+      changes: [{ field: 'isActive', label: 'Active', from: !isActive, to: isActive }]
+    });
+
     res.json({
       success: true,
       message: `${user.name} ${isActive ? 'activated' : 'deactivated'}`,
@@ -270,6 +309,14 @@ router.post('/:id/reset-password', protect, requirePermission('users', 'update')
     user.password = newPassword;
     await user.save();
 
+    // That it happened, by whom, and to whom — never the value.
+    await recordAudit(req, {
+      entity: 'user',
+      entityId: user._id,
+      entityLabel: user.name,
+      action: 'password_reset'
+    });
+
     res.json({ success: true, message: `Password reset for ${user.name}` });
   } catch (error) {
     console.error('[users] password reset failed:', error.message);
@@ -293,6 +340,14 @@ router.delete('/:id', protect, requirePermission('users', 'delete'), async (req,
 
     const user = await User.findOneAndDelete({ _id: req.params.id, account: req.accountId });
     if (!user) return res.status(404).json({ success: false, error: 'User not found' });
+
+    await auditDelete(req, {
+      entity: 'user',
+      doc: user,
+      label: user.name,
+      fields: ['name', 'email', 'mobile', 'role', 'isActive'],
+      summary: `${user.name} (${ROLE_LABELS[user.role] || user.role}) removed from the team`
+    });
 
     res.json({ success: true, message: `${user.name} removed` });
   } catch (error) {

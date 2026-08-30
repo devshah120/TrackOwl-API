@@ -5,6 +5,7 @@ import VehicleDocument, {
 } from '../models/VehicleDocument.js';
 import Truck from '../models/Truck.js';
 import { protect, requirePermission } from '../middleware/auth.js';
+import { auditCreate, auditUpdate, auditDelete } from '../utils/audit.js';
 import {
   buildDocumentFields,
   validateAttachment,
@@ -104,6 +105,11 @@ router.get('/:id/attachment', protect, requirePermission('trucks', 'read'), asyn
   }
 });
 
+// How a document names itself in the audit trail: the kind of paperwork and
+// what it belongs to, since a bare document id means nothing to a reader.
+const documentLabel = (doc) =>
+  `${VEHICLE_DOCUMENT_LABELS[doc?.docType] || doc?.docType || 'Document'}${doc?.documentNumber ? ` ${doc.documentNumber}` : ''}`;
+
 // POST /api/vehicle-documents — file one document against one of the caller's
 // trucks.
 router.post('/', protect, requirePermission('trucks', 'create'), async (req, res) => {
@@ -132,6 +138,13 @@ router.post('/', protect, requirePermission('trucks', 'create'), async (req, res
     const document = await withTruck(
       VehicleDocument.findById(created._id).select('-attachment.dataUrl')
     );
+
+    await auditCreate(req, {
+      entity: 'vehicle_document',
+      doc: created,
+      label: documentLabel(created),
+      fields: ['docType', 'documentNumber', 'issueDate', 'expiryDate', 'issuedBy', 'notes', 'attachment', 'truck']
+    });
 
     res.status(201).json({ success: true, document: decorate(document) });
   } catch (error) {
@@ -163,8 +176,10 @@ router.put('/:id', protect, requirePermission('trucks', 'update'), async (req, r
 
     // Dates are cross-checked against what is already stored, so sending only a
     // new expiry still gets validated against the saved issue date.
+    // The whole record bar the attachment blob: this read is both the date
+    // cross-check and the "before" side of the audit diff.
     const current = await VehicleDocument.findOne({ _id: req.params.id, ...ownedBy(req) })
-      .select('issueDate expiryDate');
+      .select('-attachment.dataUrl');
     if (!current) return res.status(404).json({ success: false, error: 'Document not found' });
 
     const issueDate = fields.issueDate !== undefined ? fields.issueDate : current.issueDate;
@@ -182,6 +197,14 @@ router.put('/:id', protect, requirePermission('trucks', 'update'), async (req, r
     );
     if (!document) return res.status(404).json({ success: false, error: 'Document not found' });
 
+    await auditUpdate(req, {
+      entity: 'vehicle_document',
+      before: current,
+      after: document,
+      fields,
+      label: documentLabel(document)
+    });
+
     res.json({ success: true, document: decorate(document) });
   } catch (error) {
     if (error.name === 'ValidationError') {
@@ -195,8 +218,19 @@ router.put('/:id', protect, requirePermission('trucks', 'update'), async (req, r
 // DELETE /api/vehicle-documents/:id — remove one of the caller's documents.
 router.delete('/:id', protect, requirePermission('trucks', 'delete'), async (req, res) => {
   try {
-    const document = await VehicleDocument.findOneAndDelete({ _id: req.params.id, ...ownedBy(req) });
+    const document = await VehicleDocument.findOneAndDelete(
+      { _id: req.params.id, ...ownedBy(req) },
+      { projection: '-attachment.dataUrl' }
+    );
     if (!document) return res.status(404).json({ success: false, error: 'Document not found' });
+
+    await auditDelete(req, {
+      entity: 'vehicle_document',
+      doc: document,
+      label: documentLabel(document),
+      fields: ['docType', 'documentNumber', 'issueDate', 'expiryDate', 'issuedBy', 'notes', 'attachment', 'truck']
+    });
+
     res.json({ success: true, message: 'Document removed' });
   } catch (error) {
     res.status(500).json({ success: false, error: 'Failed to delete vehicle document' });

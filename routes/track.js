@@ -3,6 +3,7 @@ import Device from '../models/Device.js';
 import Position from '../models/Position.js';
 import TrackToken from '../models/TrackToken.js';
 import { protect, requirePermission } from '../middleware/auth.js';
+import { recordAudit, auditCreate, auditDelete } from '../utils/audit.js';
 import * as traccar from '../services/traccarAdmin.js';
 import { registerDevice } from '../services/deviceRegistration.js';
 
@@ -70,6 +71,14 @@ router.post('/devices', protect, requirePermission('tracking', 'create'), async 
       ownerId: req.accountId
     });
 
+    await auditCreate(req, {
+      entity: 'device',
+      doc: device,
+      label: device.name,
+      fields: ['name', 'uniqueId', 'type', 'lifecycleStatus'],
+      summary: `Device ${device.name} (${device.uniqueId}) registered`
+    });
+
     res.status(201).json({
       success: true,
       message: `${device.name} registered`,
@@ -124,6 +133,14 @@ router.post('/devices/claim', protect, requirePermission('tracking', 'create'), 
     if (name) device.name = String(name).trim();
     await device.save();
 
+    await recordAudit(req, {
+      entity: 'device',
+      entityId: device._id,
+      entityLabel: device.name,
+      action: 'create',
+      summary: `Device ${device.name} (${device.uniqueId}) claimed`
+    });
+
     res.json({ success: true, message: `Claimed ${device.name}`, device });
   } catch (error) {
     res.status(500).json({ success: false, error: 'Failed to claim device' });
@@ -154,6 +171,14 @@ router.delete('/devices/:id', protect, requirePermission('tracking', 'delete'), 
         console.warn(`[track] removed ${device.uniqueId} locally but not from Traccar: ${err.message}`);
       }
     }
+
+    await auditDelete(req, {
+      entity: 'device',
+      doc: device,
+      label: device.name,
+      fields: ['name', 'uniqueId', 'type', 'lifecycleStatus', 'vehicle'],
+      summary: `Device ${device.name} (${device.uniqueId}) removed, along with its stored positions and share links`
+    });
 
     res.json({ success: true, message: `Removed ${device.name}` });
   } catch (error) {
@@ -189,6 +214,22 @@ router.post('/tokens', protect, requirePermission('tracking', 'create'), async (
     });
 
     const base = process.env.PUBLIC_BASE_URL || `http://localhost:${process.env.PORT || 5000}`;
+
+    // A share link exposes a vehicle's live position to anyone holding it, so
+    // issuing one is worth a log entry. The token itself is not recorded —
+    // writing the credential into a widely-readable log would defeat the point
+    // of hashing it in the first place.
+    await recordAudit(req, {
+      entity: 'share_link',
+      entityId: doc._id,
+      entityLabel: String(label).trim() || device.name,
+      action: 'create',
+      summary: `Public tracking link issued for ${device.name}, valid ${ttl} minute${ttl === 1 ? '' : 's'}`,
+      changes: [
+        { field: 'device', label: 'Device', from: null, to: device.name },
+        { field: 'expiresAt', label: 'Expires At', from: null, to: doc.expiresAt.toISOString() }
+      ]
+    });
 
     // rawToken is returned here and never again — it is not recoverable.
     res.status(201).json({
@@ -228,6 +269,15 @@ router.delete('/tokens/:id', protect, requirePermission('tracking', 'delete'), a
     if (!token) {
       return res.status(404).json({ success: false, error: 'Tracking link not found' });
     }
+
+    await recordAudit(req, {
+      entity: 'share_link',
+      entityId: token._id,
+      entityLabel: token.label || '',
+      action: 'delete',
+      summary: `Public tracking link revoked${token.label ? ` (${token.label})` : ''}`
+    });
+
     res.json({ success: true, message: 'Tracking link revoked' });
   } catch (error) {
     res.status(500).json({ success: false, error: 'Failed to revoke tracking link' });
