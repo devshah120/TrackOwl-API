@@ -14,6 +14,11 @@ export const AUDIT_ENTITIES = [
   'trip_order',
   'billing_trip',
   'ledger_entry',
+  // A fuelling recorded in the Fuel Management module. Distinct from the
+  // 'fuel' expense line it maintains on a trip: that line is a projection of
+  // this record, and the entry here is what was actually edited.
+  'fuel_entry',
+  'fuel_setting',
   'vehicle_document',
   'driver_document',
   'device',

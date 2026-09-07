@@ -24,6 +24,7 @@ import companyRoutes from './routes/companies.js';
 import auditRoutes from './routes/audit.js';
 import customerRoutes from './routes/customers.js';
 import tripOrderRoutes from './routes/tripOrders.js';
+import fuelRoutes from './routes/fuel.js';
 import { initRolePermissions } from './services/rolePermissions.js';
 
 dotenv.config();
@@ -92,6 +93,10 @@ app.use('/api/audit', auditRoutes);
 // paperwork), both of which this module links to rather than replaces.
 app.use('/api/customers', customerRoutes);
 app.use('/api/trip-orders', tripOrderRoutes);
+// Fuel Management: the fuelling register, its efficiency figures and its
+// reports. Vehicle-centric — a fuel entry needs a vehicle but not a trip — and
+// where one names a trip, it maintains that trip's fuel expense line.
+app.use('/api/fuel', fuelRoutes);
 
 // Public tracking page. The token is validated by /api/track/public/:token,
 // which the page itself calls — this only serves the map shell.

@@ -56,6 +56,11 @@ export const RESOURCES = [
   'trips',
   'billing',
   'ledger',
+  // Fuel Management: the fuelling register and its efficiency reports. Its own
+  // resource rather than part of `trips`, because fuelling is vehicle-centric —
+  // a yard top-up belongs to no trip — and because a fuel clerk is a real seat
+  // that should not imply the ability to dispatch.
+  'fuel',
   'tracking',   // devices, live positions, share links, history
   'reports'
 ];
@@ -94,6 +99,9 @@ export const DEFAULT_GRANTS = {
     'customers:*',
     'trips:*',
     'tracking:*',
+    // Fuel is operational: the fleet manager records fillings, reads the
+    // mileage reports and tunes the outlier thresholds for their own fleet.
+    'fuel:*',
     'ledger:read',
     'ledger:create',
     'billing:read',
@@ -108,6 +116,12 @@ export const DEFAULT_GRANTS = {
     'ledger:*',
     'billing:*',
     'customers:*',
+    // Fuel is a large share of what the fleet spends, so the accountant books
+    // and corrects fuel bills — but tuning the outlier thresholds is an
+    // operational judgement, so `manage` is withheld.
+    'fuel:read',
+    'fuel:create',
+    'fuel:update',
     'trips:read',
     'trucks:read',
     'drivers:read',
@@ -126,7 +140,12 @@ export const DEFAULT_GRANTS = {
     'trips:read',
     'tracking:read',
     'trucks:read',
-    'customers:read'
+    'customers:read',
+    // A driver records the fillings they make — they are the one at the pump —
+    // and can see them back. No update or delete: a correction to a fuel bill
+    // is the office's call, and the audit trail should show it as theirs.
+    'fuel:read',
+    'fuel:create'
   ]
 };
 

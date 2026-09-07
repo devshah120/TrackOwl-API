@@ -182,6 +182,31 @@ const FIELD_LABELS = {
   lifecycleStatus: 'Lifecycle Status',
   vehicle: 'Fitted To',
 
+  // Fuel Management
+  // `odometer`, `fuelType` and `status` are already labelled above under the
+  // vehicle master and mean the same thing here.
+  filledAt: 'Filled At',
+  quantity: 'Quantity',
+  rate: 'Rate per Unit',
+  amount: 'Amount',
+  fillType: 'Fill Type',
+  billNumber: 'Bill Number',
+  paymentMode: 'Payment Mode',
+  'station.name': 'Fuel Station',
+  'station.code': 'Station Code',
+  'station.city': 'Station City',
+  'station.state': 'Station State',
+  trip: 'Linked Trip',
+  remarks: 'Remarks',
+  // Fuel outlier thresholds
+  baselineMode: 'Compare Against',
+  lowEfficiencyPct: 'Low Efficiency Threshold (%)',
+  highEfficiencyPct: 'High Efficiency Threshold (%)',
+  minSamples: 'Minimum Samples',
+  baselineWindowDays: 'Baseline Window (days)',
+  rateOutlierPct: 'Rate Outlier Threshold (%)',
+  maxQuantityPerFill: 'Maximum Quantity per Filling',
+
   // Role matrix
   grants: 'Permissions'
 };
