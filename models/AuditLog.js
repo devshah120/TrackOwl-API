@@ -7,7 +7,11 @@ import mongoose from 'mongoose';
 export const AUDIT_ENTITIES = [
   'truck',
   'driver',
+  'customer',
   'trip',
+  // The operational trip managed by the Trip Management module, as opposed to
+  // 'trip' above, which is the GPS route record it links to.
+  'trip_order',
   'billing_trip',
   'ledger_entry',
   'vehicle_document',

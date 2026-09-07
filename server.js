@@ -22,6 +22,8 @@ import geoRoutes from './routes/geo.js';
 import historyRoutes from './routes/history.js';
 import companyRoutes from './routes/companies.js';
 import auditRoutes from './routes/audit.js';
+import customerRoutes from './routes/customers.js';
+import tripOrderRoutes from './routes/tripOrders.js';
 import { initRolePermissions } from './services/rolePermissions.js';
 
 dotenv.config();
@@ -85,6 +87,11 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/geo', geoRoutes);
 app.use('/api/companies', companyRoutes);
 app.use('/api/audit', auditRoutes);
+// Trip Management: the customer master and the operational trip. Distinct from
+// /api/trips (the GPS route record) and /api/billing-trips (the LR/invoice
+// paperwork), both of which this module links to rather than replaces.
+app.use('/api/customers', customerRoutes);
+app.use('/api/trip-orders', tripOrderRoutes);
 
 // Public tracking page. The token is validated by /api/track/public/:token,
 // which the page itself calls — this only serves the map shell.

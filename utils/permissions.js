@@ -52,6 +52,7 @@ export const RESOURCES = [
   'company',    // the company master (name, GSTIN, logo, signature)
   'trucks',
   'drivers',
+  'customers',  // the customer master a trip is booked against
   'trips',
   'billing',
   'ledger',
@@ -90,6 +91,7 @@ export const DEFAULT_GRANTS = {
   [ROLES.FLEET_MANAGER]: [
     'trucks:*',
     'drivers:*',
+    'customers:*',
     'trips:*',
     'tracking:*',
     'ledger:read',
@@ -105,6 +107,7 @@ export const DEFAULT_GRANTS = {
   [ROLES.ACCOUNTANT]: [
     'ledger:*',
     'billing:*',
+    'customers:*',
     'trips:read',
     'trucks:read',
     'drivers:read',
@@ -122,7 +125,8 @@ export const DEFAULT_GRANTS = {
   [ROLES.DRIVER]: [
     'trips:read',
     'tracking:read',
-    'trucks:read'
+    'trucks:read',
+    'customers:read'
   ]
 };
 
