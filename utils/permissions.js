@@ -61,6 +61,12 @@ export const RESOURCES = [
   // a yard top-up belongs to no trip — and because a fuel clerk is a real seat
   // that should not imply the ability to dispatch.
   'fuel',
+  // Maintenance Management: services, repairs, the tyre and battery masters and
+  // their reports. Its own resource rather than part of `trucks`, because the
+  // vehicle master is a record of what the fleet owns while maintenance is a
+  // stream of work done to it — and a workshop clerk who books job cards has no
+  // business editing the fleet register itself.
+  'maintenance',
   'tracking',   // devices, live positions, share links, history
   'reports'
 ];
@@ -102,6 +108,9 @@ export const DEFAULT_GRANTS = {
     // Fuel is operational: the fleet manager records fillings, reads the
     // mileage reports and tunes the outlier thresholds for their own fleet.
     'fuel:*',
+    // Maintenance likewise: booking a vehicle in, approving a repair and
+    // setting the service reminder windows are all the fleet manager's call.
+    'maintenance:*',
     'ledger:read',
     'ledger:create',
     'billing:read',
@@ -122,6 +131,12 @@ export const DEFAULT_GRANTS = {
     'fuel:read',
     'fuel:create',
     'fuel:update',
+    // Maintenance is a large share of what the fleet spends, so the accountant
+    // books and corrects workshop invoices — but approving a repair and tuning
+    // the reminder windows are operational judgements, so `manage` is withheld.
+    'maintenance:read',
+    'maintenance:create',
+    'maintenance:update',
     'trips:read',
     'trucks:read',
     'drivers:read',
@@ -145,7 +160,13 @@ export const DEFAULT_GRANTS = {
     // and can see them back. No update or delete: a correction to a fuel bill
     // is the office's call, and the audit trail should show it as theirs.
     'fuel:read',
-    'fuel:create'
+    'fuel:create',
+    // A driver reports the faults they find — they are the one in the cab — and
+    // can see the jobs raised on their vehicle. No update or delete: what
+    // happens to a repair request after it is raised is the workshop's and the
+    // office's call, and the audit trail should show it as theirs.
+    'maintenance:read',
+    'maintenance:create'
   ]
 };
 

@@ -207,6 +207,61 @@ const FIELD_LABELS = {
   rateOutlierPct: 'Rate Outlier Threshold (%)',
   maxQuantityPerFill: 'Maximum Quantity per Filling',
 
+  // Maintenance Management
+  // `odometer`, `status`, `priority` and `notes` mean here what they mean
+  // above; only the fields particular to a job card are named again.
+  serviceType: 'Service Type',
+  servicedAt: 'Service Date',
+  labourCost: 'Labour Cost',
+  partsTotal: 'Parts Total',
+  taxAmount: 'Tax',
+  discount: 'Discount',
+  totalCost: 'Total Cost',
+  invoiceNumber: 'Invoice Number',
+  nextServiceDate: 'Next Service Date',
+  nextServiceKm: 'Next Service (km)',
+  'workshop.name': 'Workshop',
+  'workshop.type': 'Workshop Type',
+  'workshop.city': 'Workshop City',
+  'workshop.contact': 'Workshop Contact',
+  // Repair request
+  requestNumber: 'Request Number',
+  issue: 'Reported Issue',
+  reportedAt: 'Reported On',
+  reportedByName: 'Reported By',
+  estimatedCost: 'Estimated Cost',
+  diagnosis: 'Diagnosis',
+  workDone: 'Work Done',
+  downtimeHours: 'Downtime (hours)',
+  // Tyre master
+  tyreNumber: 'Tyre Number',
+  serialNumber: 'Serial Number',
+  size: 'Size',
+  position: 'Fitted Position',
+  treadDepthMm: 'Tread Depth (mm)',
+  runningKm: 'Distance Run (km)',
+  costPerKm: 'Cost per km',
+  ratedKm: 'Rated Life (km)',
+  retreadCost: 'Retread Cost',
+  salvageValue: 'Salvage Value',
+  scrapReason: 'Scrap Reason',
+  // Battery master
+  voltage: 'Voltage',
+  capacityAh: 'Capacity (Ah)',
+  warrantyMonths: 'Warranty (months)',
+  warrantyExpiry: 'Warranty Expiry',
+  health: 'Health',
+  installedAt: 'Installed On',
+  expectedReplacementDate: 'Expected Replacement',
+  removalReason: 'Removal Reason',
+  // Maintenance reminder thresholds
+  serviceDueDays: 'Service Reminder (days)',
+  serviceDueKm: 'Service Reminder (km)',
+  overdueGraceDays: 'Overdue Grace Period (days)',
+  tyreMinTreadMm: 'Minimum Tread Depth (mm)',
+  batteryLifeMonths: 'Expected Battery Life (months)',
+  warrantyWarnDays: 'Warranty Warning (days)',
+
   // Role matrix
   grants: 'Permissions'
 };

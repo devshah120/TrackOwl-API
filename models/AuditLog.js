@@ -19,6 +19,15 @@ export const AUDIT_ENTITIES = [
   // this record, and the entry here is what was actually edited.
   'fuel_entry',
   'fuel_setting',
+  // The Maintenance Management records. A service and a repair are separate
+  // entities rather than one 'maintenance' row because they are separate
+  // collections with different workflows, and an audit trail that blurred them
+  // could not answer "who closed that repair".
+  'service_record',
+  'repair_request',
+  'tyre',
+  'battery',
+  'maintenance_setting',
   'vehicle_document',
   'driver_document',
   'device',

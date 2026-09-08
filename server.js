@@ -25,6 +25,8 @@ import auditRoutes from './routes/audit.js';
 import customerRoutes from './routes/customers.js';
 import tripOrderRoutes from './routes/tripOrders.js';
 import fuelRoutes from './routes/fuel.js';
+import maintenanceRoutes from './routes/maintenance.js';
+import componentRoutes from './routes/components.js';
 import { initRolePermissions } from './services/rolePermissions.js';
 
 dotenv.config();
@@ -97,6 +99,15 @@ app.use('/api/trip-orders', tripOrderRoutes);
 // reports. Vehicle-centric — a fuel entry needs a vehicle but not a trip — and
 // where one names a trip, it maintains that trip's fuel expense line.
 app.use('/api/fuel', fuelRoutes);
+// Maintenance Management: scheduled services, repair requests and their
+// workflow, plus the reminder engine and the cost reports. Vehicle-centric like
+// fuel — a service belongs to a vehicle and to no trip — and it moves a
+// vehicle's own status to Maintenance while a repair holds it off the road.
+app.use('/api/maintenance', maintenanceRoutes);
+// The tyre and battery masters that maintenance tracks. Split out because these
+// are asset registers with a fit/remove/scrap lifecycle rather than job cards,
+// though both sit behind the same `maintenance` permission resource.
+app.use('/api/components', componentRoutes);
 
 // Public tracking page. The token is validated by /api/track/public/:token,
 // which the page itself calls — this only serves the map shell.
