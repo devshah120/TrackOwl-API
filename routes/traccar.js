@@ -2,6 +2,7 @@ import express from 'express';
 import crypto from 'crypto';
 import Device from '../models/Device.js';
 import Position from '../models/Position.js';
+import { isValidImei } from '../services/deviceRegistration.js';
 
 const router = express.Router();
 
@@ -72,9 +73,12 @@ router.post('/forward', async (req, res) => {
             fixTime
           }
         },
+        // deviceType is set here rather than left to the schema default: an
+        // upsert runs defaults with no document, so the default can't see uniqueId.
         $setOnInsert: {
           uniqueId,
-          name: device?.name || `Device ${uniqueId}`
+          name: device?.name || `Device ${uniqueId}`,
+          deviceType: isValidImei(uniqueId) ? 'hardware' : 'phone'
         }
       },
       { upsert: true, new: true, setDefaultsOnInsert: true }

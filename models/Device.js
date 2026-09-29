@@ -59,11 +59,15 @@ const deviceSchema = new mongoose.Schema({
   // which is the same rule registerDevice() applies. Assuming 'hardware' here
   // would relabel every legacy phone on read, since Mongoose fills defaults in
   // even for fields the document never stored.
+  //
+  // `this` is null when Mongoose applies this default through an upsert with
+  // setDefaultsOnInsert (the Traccar forward path), so it must not be
+  // dereferenced blindly — that path sets deviceType itself in $setOnInsert.
   deviceType: {
     type: String,
     enum: DEVICE_TYPES,
     default: function () {
-      return /^\d{15,17}$/.test(String(this.uniqueId || '')) ? 'hardware' : 'phone';
+      return /^\d{15,17}$/.test(String(this?.uniqueId || '')) ? 'hardware' : 'phone';
     }
   },
   // The unit's IMEI. For hardware this is the same value as `uniqueId` (the
