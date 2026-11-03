@@ -13,8 +13,11 @@ import {
   describe,
   usageFor,
   priceFor,
-  applyPayment
+  applyPayment,
+  planFor,
+  accessFor
 } from '../services/subscriptions.js';
+import { displayFeatures, PLAN_MODULES } from '../services/planCatalog.js';
 import {
   getRazorpayConfig,
   createOrder,
@@ -43,7 +46,10 @@ const planForPublic = (p) => ({
   description: p.description,
   monthlyPrice: p.monthlyPrice,
   yearlyPrice: p.yearlyPrice,
-  features: p.features,
+  // Built from the plan's limits and modules (+ extra lines), so the pricing
+  // page always says what the plan really includes.
+  features: displayFeatures(p),
+  modules: p.modules || [],
   maxVehicles: p.maxVehicles,
   maxUsers: p.maxUsers,
   highlight: p.highlight
@@ -74,7 +80,7 @@ router.get('/', protect, async (req, res) => {
     ]);
     res.json({
       success: true,
-      subscription: describe(sub, settings),
+      subscription: describe(sub, settings, await planFor(sub)),
       usage,
       plans: plans.map(planForPublic),
       payments: payments.map((p) => ({
@@ -96,6 +102,22 @@ router.get('/', protect, async (req, res) => {
   } catch (error) {
     console.error('[subscription] read failed:', error.message);
     res.status(500).json({ success: false, error: 'Failed to load your plan' });
+  }
+});
+
+// GET /api/subscription/access — the small version, for the menu and page
+// guards: status, which modules are open, limits. Cached server-side.
+router.get('/access', protect, async (req, res) => {
+  try {
+    const access = req.user.role === 'super_admin' ? null : req.subscription || (await accessFor(req.accountId));
+    res.json({
+      success: true,
+      superAdmin: req.user.role === 'super_admin',
+      access,
+      catalog: PLAN_MODULES.map(({ key, label, group }) => ({ key, label, group }))
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: 'Failed to load plan access' });
   }
 });
 
@@ -200,7 +222,7 @@ router.post('/verify', protect, async (req, res) => {
     }
     const settings = await getBillingSettings();
     const sub = await getSubscription(req.accountId);
-    res.json({ success: true, subscription: describe(sub, settings) });
+    res.json({ success: true, subscription: describe(sub, settings, await planFor(sub)) });
   } catch (error) {
     console.error('[subscription] verify failed:', error.message);
     res.status(500).json({ success: false, error: 'Payment received but activation failed — it will complete automatically, or contact support with your payment id.' });

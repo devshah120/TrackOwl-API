@@ -14,8 +14,10 @@ import {
   getSubscription,
   describe,
   usageFor,
-  invalidateAccess
+  invalidateAccess,
+  invalidateAllAccess
 } from '../services/subscriptions.js';
+import { PLAN_MODULES, cleanModules, displayFeatures } from '../services/planCatalog.js';
 import { getRazorpayConfig, invalidateRazorpayConfig, testCredentials } from '../services/razorpay.js';
 import { encryptSecret, maskSecret } from '../utils/secretBox.js';
 
@@ -62,11 +64,12 @@ const buildPlan = (body = {}, { partial = false } = {}) => {
       out[k] = n;
     }
   }
-  if (body.features !== undefined) {
-    out.features = (Array.isArray(body.features) ? body.features : String(body.features).split('\n'))
+  if (body.modules !== undefined) out.modules = cleanModules(body.modules);
+  if (body.extraFeatures !== undefined) {
+    out.extraFeatures = (Array.isArray(body.extraFeatures) ? body.extraFeatures : String(body.extraFeatures).split('\n'))
       .map((f) => String(f).trim())
       .filter(Boolean)
-      .slice(0, 30);
+      .slice(0, 20);
   }
   if (body.highlight !== undefined) out.highlight = Boolean(body.highlight);
   if (body.active !== undefined) out.active = Boolean(body.active);
@@ -80,7 +83,11 @@ router.get('/plans', async (req, res) => {
     const plans = await Plan.find().sort({ sortOrder: 1, monthlyPrice: 1 }).lean();
     const counts = await Subscription.aggregate([{ $match: { plan: { $ne: null } } }, { $group: { _id: '$plan', n: { $sum: 1 } } }]);
     const byPlan = new Map(counts.map((c) => [String(c._id), c.n]));
-    res.json({ success: true, plans: plans.map((p) => ({ ...p, subscribers: byPlan.get(String(p._id)) || 0 })) });
+    res.json({
+      success: true,
+      plans: plans.map((p) => ({ ...p, modules: p.modules || [], subscribers: byPlan.get(String(p._id)) || 0, displayFeatures: displayFeatures(p) })),
+      catalog: PLAN_MODULES.map(({ key, label, group }) => ({ key, label, group }))
+    });
   } catch (error) {
     res.status(500).json({ success: false, error: 'Failed to load plans' });
   }
@@ -91,7 +98,7 @@ router.post('/plans', async (req, res) => {
     const { fields, error } = buildPlan(req.body);
     if (error) return res.status(400).json({ success: false, error });
     if (await Plan.exists({ key: fields.key })) return res.status(409).json({ success: false, error: `A plan with code "${fields.key}" already exists` });
-    const plan = await Plan.create({ ...fields, updatedBy: req.user._id });
+    const plan = await Plan.create({ modules: [], ...fields, updatedBy: req.user._id });
     if (plan.highlight) await Plan.updateMany({ _id: { $ne: plan._id } }, { $set: { highlight: false } });
     await audit(req, plan.name, `Plan ${plan.name} created — ₹${plan.monthlyPrice}/month, ₹${plan.yearlyPrice}/year`);
     res.status(201).json({ success: true, plan });
@@ -115,11 +122,19 @@ router.put('/plans/:id', async (req, res) => {
     const plan = await Plan.findByIdAndUpdate(before._id, { $set: { ...fields, updatedAt: new Date(), updatedBy: req.user._id } }, { new: true });
     // Only one plan carries the "Most Popular" badge.
     if (fields.highlight) await Plan.updateMany({ _id: { $ne: plan._id } }, { $set: { highlight: false } });
+    // Limits and modules are live — every subscriber's access changes now.
+    invalidateAllAccess();
     const changes = ['monthlyPrice', 'yearlyPrice', 'maxVehicles', 'maxUsers', 'active']
       .filter((k) => k in fields && fields[k] !== before[k])
       .map((k) => ({ field: k, label: k, from: before[k] ?? null, to: fields[k] ?? null }));
+    if (fields.modules) {
+      const was = before.modules || [];
+      const added = fields.modules.filter((m) => !was.includes(m));
+      const removed = was.filter((m) => !fields.modules.includes(m));
+      if (added.length || removed.length) changes.push({ field: 'modules', label: 'Modules', from: removed.join(', ') || null, to: added.join(', ') || null });
+    }
     await audit(req, plan.name, `Plan ${plan.name} updated`, changes);
-    res.json({ success: true, plan, note: 'Price and limit changes apply to each subscriber at their next renewal.' });
+    res.json({ success: true, plan, note: 'Limits and modules apply to every subscriber immediately; a price change applies from their next payment.' });
   } catch (error) {
     res.status(500).json({ success: false, error: 'Failed to update plan' });
   }
@@ -288,15 +303,17 @@ router.put('/settings', async (req, res) => {
 
 router.get('/subscriptions', async (req, res) => {
   try {
-    const [owners, settings] = await Promise.all([
+    const [owners, settings, plans] = await Promise.all([
       User.find({ account: null, role: { $ne: ROLES.SUPER_ADMIN } }).select('name email company mobile isActive createdAt').sort({ createdAt: -1 }).lean(),
-      getBillingSettings()
+      getBillingSettings(),
+      Plan.find().lean()
     ]);
+    const planById = new Map(plans.map((p) => [String(p._id), p]));
     const rows = [];
     for (const owner of owners) {
       const sub = await getSubscription(owner._id);
       const usage = await usageFor(owner._id);
-      rows.push({ owner, usage, subscription: describe(sub, settings) });
+      rows.push({ owner, usage, subscription: describe(sub, settings, sub.plan ? planById.get(String(sub.plan)) : null) });
     }
     const status = req.query.status;
     res.json({ success: true, subscriptions: status ? rows.filter((r) => r.subscription.status === status) : rows });
@@ -360,7 +377,7 @@ router.post('/subscriptions/:owner/action', async (req, res) => {
     await sub.save();
     invalidateAccess(owner._id);
     await recordAudit(req, { entity: 'company', entityId: owner._id, action: 'update', label: owner.company || owner.name, summary: `${owner.company || owner.name}: ${summary}`, account: owner._id });
-    res.json({ success: true, subscription: describe(sub, await getBillingSettings()), message: summary });
+    res.json({ success: true, subscription: describe(sub, await getBillingSettings(), sub.plan ? await Plan.findById(sub.plan).lean() : null), message: summary });
   } catch (error) {
     console.error('[admin-billing] action failed:', error.message);
     res.status(500).json({ success: false, error: 'Failed to update the subscription' });

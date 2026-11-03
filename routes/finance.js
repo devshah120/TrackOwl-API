@@ -67,9 +67,11 @@ router.get('/cashflow', protect, requirePermission('ledger', 'read'), withRange(
 router.get('/dashboard', protect, guard(async (req, res) => {
   const owner = req.accountId;
   const role = req.user.role;
-  const canFinance = hasPermission(role, 'ledger', 'read');
-  const canBilling = hasPermission(role, 'billing', 'read');
-  const canTrips = hasPermission(role, 'trips', 'read');
+  // A block is shown when the role may see it AND the plan includes it.
+  const inPlan = (module) => !req.subscription || req.subscription.modules?.includes(module);
+  const canFinance = hasPermission(role, 'ledger', 'read') && inPlan('finance');
+  const canBilling = hasPermission(role, 'billing', 'read') && inPlan('gst_invoicing');
+  const canTrips = hasPermission(role, 'trips', 'read') && inPlan('trip_management');
   const now = new Date();
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
   const out = { success: true, generatedAt: now };
@@ -157,7 +159,7 @@ router.get('/dashboard', protect, guard(async (req, res) => {
   // Fuel efficiency by vehicle (brief §2). Over 90 days rather than the
   // month: mileage is only measured full-tank to full-tank, and a single month
   // often holds too few of those per vehicle to say anything.
-  if (hasPermission(role, 'fuel', 'read')) {
+  if (hasPermission(role, 'fuel', 'read') && inPlan('fuel')) {
     const since = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
     const { vehicles, fleetAverages } = await efficiencyRanking({ accountId: owner, from: since, to: now });
     out.fuel = {

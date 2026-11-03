@@ -28,7 +28,9 @@ router.get('/', protect, async (req, res) => {
     // Maintenance reminders are account-wide rows; a seat that cannot see
     // maintenance does not get them in its bell.
     const filter = ownedBy(req);
-    if (!hasPermission(req.user.role, 'maintenance', 'read')) filter.category = { $ne: 'maintenance' };
+    // ...nor does an account whose plan does not include maintenance.
+    const maintenanceInPlan = !req.subscription || req.subscription.modules?.includes('maintenance');
+    if (!hasPermission(req.user.role, 'maintenance', 'read') || !maintenanceInPlan) filter.category = { $ne: 'maintenance' };
     const notifications = await Notification.find(filter).sort({ createdAt: -1 }).limit(50);
     res.json({ success: true, notifications });
   } catch (error) {

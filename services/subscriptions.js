@@ -7,6 +7,7 @@ import User from '../models/User.js';
 import Notification from '../models/Notification.js';
 import { sendAlertDigestEmail } from './emailService.js';
 import { getRazorpayConfig, fetchOrderPayments } from './razorpay.js';
+import { ALL_MODULE_KEYS } from './planCatalog.js';
 
 // Plans, trials, paid periods and what an account may do because of them.
 //
@@ -29,7 +30,8 @@ const DEFAULT_PLANS = [
     monthlyPrice: 999,
     yearlyPrice: 9990,
     maxVehicles: 5,
-    features: ['Up to 5 vehicles', 'Basic GPS tracking', 'Monthly reports', 'Email support', 'Basic analytics'],
+    modules: ['gps_tracking', 'trip_history', 'trip_management', 'lr_documents', 'fuel', 'reports'],
+    extraFeatures: ['Email support'],
     sortOrder: 1
   },
   {
@@ -40,17 +42,8 @@ const DEFAULT_PLANS = [
     yearlyPrice: 49990,
     maxVehicles: 50,
     highlight: true,
-    features: [
-      'Up to 50 vehicles',
-      'Real-time GPS tracking',
-      'GST invoice automation',
-      'Trip history & analytics',
-      'Driver management',
-      'Customer tracking links',
-      'Priority support',
-      'Advanced reporting',
-      'Mobile app access'
-    ],
+    modules: ['gps_tracking', 'trip_history', 'alerts_geofence', 'tracking_links', 'trip_management', 'lr_documents', 'driver_app', 'gst_invoicing', 'fuel', 'maintenance', 'reports'],
+    extraFeatures: ['Priority support'],
     sortOrder: 2
   },
   {
@@ -60,27 +53,32 @@ const DEFAULT_PLANS = [
     monthlyPrice: 9999,
     yearlyPrice: 99990,
     maxVehicles: null,
-    features: [
-      'Unlimited vehicles',
-      'Real-time GPS tracking',
-      'Full GST automation',
-      'Advanced analytics & BI',
-      'Multi-user management',
-      'Custom integrations',
-      'Dedicated support',
-      'Custom workflows',
-      'On-premise deployment'
-    ],
+    modules: [...ALL_MODULE_KEYS],
+    extraFeatures: ['Dedicated support', 'Custom workflows', 'On-premise deployment'],
     sortOrder: 3
   }
 ];
 
 export const ensurePlans = async () => {
-  if (await Plan.exists({})) return;
-  try {
-    await Plan.insertMany(DEFAULT_PLANS, { ordered: false });
-  } catch (error) {
-    if (error.code !== 11000) throw error;
+  if (!(await Plan.exists({}))) {
+    try {
+      await Plan.insertMany(DEFAULT_PLANS, { ordered: false });
+    } catch (error) {
+      if (error.code !== 11000) throw error;
+    }
+    return;
+  }
+  // Plans saved before modules existed: give each its modules once — the
+  // default set for the three original plans, everything for any other — and
+  // keep only its support-style lines as extras (limit and module lines are
+  // now generated).
+  const legacy = await Plan.find({ modules: { $exists: false } }).lean();
+  for (const plan of legacy) {
+    const preset = DEFAULT_PLANS.find((d) => d.key === plan.key);
+    await Plan.updateOne(
+      { _id: plan._id, modules: { $exists: false } },
+      { $set: { modules: preset ? preset.modules : [...ALL_MODULE_KEYS], extraFeatures: preset ? preset.extraFeatures : plan.features || [] } }
+    );
   }
 };
 
@@ -141,22 +139,30 @@ export const deriveStatus = (sub, settings, now = Date.now()) => {
 };
 
 // Everything the app needs to know about an account's plan, in one object.
+//
+// `plan` is the live Plan document. Limits and modules are read from it, not
+// from the snapshot taken at payment, so the Super Admin's edits apply to
+// every subscriber at once. The snapshot is only the fallback for a plan that
+// has since been deleted.
+//
+// During the trial — and while enforcement is switched off — every module is
+// open and there are no limits.
 export const describe = (sub, settings, plan = null) => {
   const status = deriveStatus(sub, settings);
   const endsAt = status === 'trialing' || (status === 'grace' && !sub.currentPeriodEnd) ? sub.trialEndsAt : sub.currentPeriodEnd;
   const graceEndsAt =
     status === 'grace' ? new Date(Math.max(new Date(sub.currentPeriodEnd || 0), new Date(sub.trialEndsAt || 0)).getTime() + settings.graceDays * DAY) : null;
-  const limits = status === 'trialing' || !sub.plan
-    // A trial runs with the most generous active plan's limits, so the
-    // customer can try everything; a paid account gets its own plan's.
+  const source = plan || (sub.planSnapshot?.key ? sub.planSnapshot : null);
+  const open = status === 'trialing' || !sub.plan || !settings.enforce;
+  const limits = open
     ? { maxVehicles: null, maxUsers: null }
-    : { maxVehicles: sub.planSnapshot?.maxVehicles ?? null, maxUsers: sub.planSnapshot?.maxUsers ?? null };
+    : { maxVehicles: source?.maxVehicles ?? null, maxUsers: source?.maxUsers ?? null };
+  const modules = open || !plan ? [...ALL_MODULE_KEYS] : Array.isArray(plan.modules) ? plan.modules : [...ALL_MODULE_KEYS];
   return {
     status,
     blocked: Boolean(settings.enforce) && ['expired', 'cancelled'].includes(status),
     enforce: Boolean(settings.enforce),
-    plan: sub.plan ? { id: String(sub.plan._id || sub.plan), key: sub.planSnapshot?.key, name: sub.planSnapshot?.name } : null,
-    planDetails: plan,
+    plan: sub.plan ? { id: String(sub.plan._id || sub.plan), key: plan?.key || sub.planSnapshot?.key, name: plan?.name || sub.planSnapshot?.name } : null,
     cycle: sub.cycle,
     trialEndsAt: sub.trialEndsAt,
     currentPeriodStart: sub.currentPeriodStart,
@@ -164,9 +170,16 @@ export const describe = (sub, settings, plan = null) => {
     endsAt,
     graceEndsAt,
     daysLeft: endsAt ? Math.ceil((new Date(endsAt).getTime() - Date.now()) / DAY) : null,
-    limits
+    limits,
+    modules
   };
 };
+
+// The live plan an account is on, or null.
+export const planFor = (sub) => (sub?.plan ? Plan.findById(sub.plan).lean() : null);
+
+// A plan edit changes every subscriber's access; drop the whole cache.
+export const invalidateAllAccess = () => cache.clear();
 
 // --- access cache ------------------------------------------------------------
 // The middleware asks this on every request; a minute's cache keeps it off the
@@ -181,7 +194,7 @@ export const accessFor = async (owner) => {
   const hit = cache.get(key);
   if (hit && Date.now() - hit.at < CACHE_MS) return hit.value;
   const [sub, settings] = await Promise.all([getSubscription(owner), getBillingSettings()]);
-  const value = describe(sub, settings);
+  const value = describe(sub, settings, await planFor(sub));
   cache.set(key, { at: Date.now(), value });
   return value;
 };
@@ -290,7 +303,7 @@ export const applyPayment = async (orderId, { paymentId, signature = '', method 
  */
 export const billingReminders = async (owner) => {
   const [sub, settings] = await Promise.all([getSubscription(owner), getBillingSettings()]);
-  const info = describe(sub, settings);
+  const info = describe(sub, settings, await planFor(sub));
   const stages = settings.reminderDays?.length ? settings.reminderDays : [7, 3, 1];
   const endsAt = info.status === 'grace' ? info.graceEndsAt : info.endsAt;
   if (!endsAt) return;

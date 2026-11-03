@@ -8,6 +8,9 @@ import mongoose from 'mongoose';
 //
 // Prices are whole rupees as shown to the customer. They are what the customer
 // pays (Razorpay is charged this amount × 100 paise).
+//
+// Limits and modules are live: an edit applies to every subscriber of the
+// plan at once. Only the price waits for the next payment, naturally.
 
 const planSchema = new mongoose.Schema({
   // Stable identifier used in URLs (/billing?plan=professional). Not editable
@@ -19,7 +22,16 @@ const planSchema = new mongoose.Schema({
   monthlyPrice: { type: Number, min: 0, required: true },
   yearlyPrice: { type: Number, min: 0, required: true },
 
-  // What the plan includes, one line each, in display order.
+  // The app modules this plan includes (services/planCatalog.js). Enforced:
+  // a module not listed here is refused by the API and hidden in the menu.
+  // Unset on plans created before modules existed — those are migrated once
+  // by ensurePlans().
+  modules: { type: [String], default: undefined },
+  // Extra lines for the pricing page that are not app modules — support
+  // level, onboarding, SLA. Descriptive only.
+  extraFeatures: { type: [String], default: [] },
+  // Legacy free-text feature list from before modules. Kept so nothing is
+  // lost; the pricing page now builds its list from limits + modules + extras.
   features: { type: [String], default: [] },
 
   // Enforced limits. Null = unlimited.

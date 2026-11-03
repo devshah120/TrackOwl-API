@@ -3,6 +3,7 @@ import mongoose from 'mongoose';
 import User from '../models/User.js';
 import Driver from '../models/Driver.js';
 import { accessFor } from '../services/subscriptions.js';
+import { moduleForPath, MODULE_LABELS } from '../services/planCatalog.js';
 import { ROLES, hasPermission } from '../utils/permissions.js';
 
 // Routes an account with an expired plan can still reach.
@@ -91,6 +92,19 @@ export const protect = async (req, res, next) => {
               ? 'This account has been suspended. Please contact TrackOwl support.'
               : 'Your plan has expired. Renew it under Settings → Plan & Billing to continue.',
           subscription: { status: req.subscription.status, endsAt: req.subscription.endsAt }
+        });
+      }
+
+      // The plan's modules. A request into a module the plan does not
+      // include is refused, whatever the seat's role allows — so unticking
+      // a module on a plan takes it away from every subscriber at once.
+      const module = moduleForPath(path);
+      if (module && req.subscription && !req.subscription.modules?.includes(module)) {
+        return res.status(403).json({
+          success: false,
+          code: 'PLAN_FEATURE',
+          module,
+          error: `${MODULE_LABELS[module]} is not included in your ${req.subscription.plan?.name || ''} plan. Upgrade under Settings → Plan & Billing.`.replace('  ', ' ')
         });
       }
     }
