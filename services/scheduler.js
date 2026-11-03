@@ -2,6 +2,7 @@ import User from '../models/User.js';
 import Notification from '../models/Notification.js';
 import { ROLES } from '../utils/permissions.js';
 import { synthesizeNotifications } from './notificationSynth.js';
+import { billingReminders } from './subscriptions.js';
 import { getAlertSettings } from './gpsAlerts.js';
 import { sendAlertDigestEmail } from './emailService.js';
 import { emitEvent } from './webhooks.js';
@@ -65,6 +66,7 @@ export const runScan = async () => {
     for (const owner of owners) {
       try {
         await synthesizeNotifications(owner._id);
+        await billingReminders(owner._id);
       } catch (error) {
         failed = error.message;
         console.error(`[scheduler] scan failed for ${owner._id}:`, error.message);

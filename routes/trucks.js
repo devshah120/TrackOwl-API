@@ -10,6 +10,7 @@ import { protect, requirePermission } from '../middleware/auth.js';
 import { hasPermission } from '../utils/permissions.js';
 import { readDriverList, syncTruckDrivers, attachDrivers } from '../utils/drivers.js';
 import { auditCreate, auditUpdate, auditDelete } from '../utils/audit.js';
+import { checkLimit } from '../services/subscriptions.js';
 
 const router = express.Router();
 
@@ -192,6 +193,10 @@ router.get('/', protect, requirePermission('trucks', 'read'), async (req, res) =
 // POST /api/trucks — create a truck and its drivers for the caller.
 router.post('/', protect, requirePermission('trucks', 'create'), async (req, res) => {
   try {
+    // The plan's vehicle limit (Plans & Billing).
+    const overLimit = await checkLimit(req.accountId, 'vehicles');
+    if (overLimit) return res.status(402).json({ success: false, code: 'PLAN_LIMIT', error: overLimit });
+
     const body = req.body || {};
     const fields = buildTruckFields(body);
     if (!fields.number || !fields.model) {

@@ -33,6 +33,8 @@ import vendorRoutes from './routes/vendors.js';
 import financeRoutes from './routes/finance.js';
 import reportRoutes from './routes/reports.js';
 import integrationRoutes from './routes/integrations.js';
+import subscriptionRoutes, { publicPlansRouter } from './routes/subscription.js';
+import adminBillingRoutes from './routes/adminBilling.js';
 import { startScheduler, schedulerStatus } from './services/scheduler.js';
 import { startRetention, lastRun as retentionLastRun } from './services/retention.js';
 import Position from './models/Position.js';
@@ -61,7 +63,15 @@ if (!process.env.JWT_SECRET) {
 app.use(securityHeaders);
 // Trips can carry a long OSRM routePolyline (thousands of [lat, lng] points), so
 // raise the body limit above the 100kb default to avoid PayloadTooLargeError.
-app.use(express.json({ limit: '5mb' }));
+// The raw bytes are kept for the Razorpay webhook only: its signature is over
+// the body exactly as sent, which re-serialising the parsed JSON would not
+// reproduce.
+app.use(express.json({
+  limit: '5mb',
+  verify: (req, res, buf) => {
+    if (req.originalUrl?.startsWith('/api/subscription/webhook')) req.rawBody = buf;
+  }
+}));
 app.use(express.urlencoded({ extended: true, limit: '5mb' }));
 // CORS_ORIGIN accepts a comma-separated list so the deployed frontend and a
 // local `npm run dev` session can both reach the API.
@@ -117,6 +127,9 @@ app.use('/api/ledger', ledgerRoutes);
 app.use('/api/billing-trips', billingRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/history', historyRoutes);
+// Plans & Billing (Super Admin). Mounted ahead of /api/admin so its requests
+// do not first pass through the admin router's own guard.
+app.use('/api/admin/billing', adminBillingRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/geo', geoRoutes);
 app.use('/api/companies', companyRoutes);
@@ -150,6 +163,10 @@ app.use('/api/finance', financeRoutes);
 app.use('/api/reports', reportRoutes);
 // Integrations: outbound webhooks to other systems (Company Admin only).
 app.use('/api/integrations', integrationRoutes);
+// Subscriptions and Razorpay: the public plan list for the pricing page, the
+// account's plan, checkout, verification and the Razorpay webhook.
+app.use('/api/plans', publicPlansRouter);
+app.use('/api/subscription', subscriptionRoutes);
 
 // Public tracking page. The token is validated by /api/track/public/:token,
 // which the page itself calls — this only serves the map shell.

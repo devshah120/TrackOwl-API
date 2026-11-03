@@ -2,7 +2,11 @@ import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
 import User from '../models/User.js';
 import Driver from '../models/Driver.js';
+import { accessFor } from '../services/subscriptions.js';
 import { ROLES, hasPermission } from '../utils/permissions.js';
+
+// Routes an account with an expired plan can still reach.
+const BILLING_ALLOWLIST = ['/api/auth', '/api/user', '/api/subscription', '/api/plans', '/api/notifications'];
 
 export const protect = async (req, res, next) => {
   try {
@@ -61,6 +65,34 @@ export const protect = async (req, res, next) => {
     if (user.role === ROLES.DRIVER) {
       const profile = await Driver.findOne({ owner: req.accountId, mobile: user.mobile }).select('_id').lean();
       req.driverProfileId = profile?._id || new mongoose.Types.ObjectId();
+    }
+
+    // Plan & billing. An account whose trial and paid period (plus grace) are
+    // over is blocked with 402, except for what it needs to get unblocked:
+    // signing in, its profile, the billing pages, and the bell. GPS ingestion
+    // does not pass through here, so tracking data keeps arriving and nothing
+    // is lost while an account is unpaid. The Super Admin is never blocked.
+    if (user.role !== ROLES.SUPER_ADMIN) {
+      try {
+        req.subscription = await accessFor(req.accountId);
+      } catch (error) {
+        // A billing lookup failure must not take the whole API down.
+        console.error('[auth] subscription check failed:', error.message);
+        req.subscription = null;
+      }
+      const path = req.originalUrl || '';
+      const allowed = BILLING_ALLOWLIST.some((prefix) => path.startsWith(prefix));
+      if (req.subscription?.blocked && !allowed) {
+        return res.status(402).json({
+          success: false,
+          code: 'SUBSCRIPTION_REQUIRED',
+          error:
+            req.subscription.status === 'cancelled'
+              ? 'This account has been suspended. Please contact TrackOwl support.'
+              : 'Your plan has expired. Renew it under Settings → Plan & Billing to continue.',
+          subscription: { status: req.subscription.status, endsAt: req.subscription.endsAt }
+        });
+      }
     }
     next();
   } catch (error) {

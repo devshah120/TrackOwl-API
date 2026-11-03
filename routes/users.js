@@ -3,6 +3,7 @@ import User from '../models/User.js';
 import { protect, requirePermission } from '../middleware/auth.js';
 import { recordAudit, auditCreate, auditUpdate, auditDelete } from '../utils/audit.js';
 import { validateEmail, validatePassword, validateMobile } from '../utils/validators.js';
+import { checkLimit } from '../services/subscriptions.js';
 import {
   ASSIGNABLE_ROLES,
   ROLE_LABELS,
@@ -80,6 +81,10 @@ router.get('/', protect, requirePermission('users', 'read'), async (req, res) =>
 // own: they are staff at one company, not a separate registration.
 router.post('/', protect, requirePermission('users', 'create'), async (req, res) => {
   try {
+    // The plan's user limit (Plans & Billing).
+    const overLimit = await checkLimit(req.accountId, 'users');
+    if (overLimit) return res.status(402).json({ success: false, code: 'PLAN_LIMIT', error: overLimit });
+
     const { name, email, mobile, password, role } = req.body || {};
 
     if (!name || !email || !mobile || !password || !role) {
