@@ -16,7 +16,8 @@ import {
   usageFor,
   invalidateAccess
 } from '../services/subscriptions.js';
-import { razorpayConfigured } from '../services/razorpay.js';
+import { getRazorpayConfig, invalidateRazorpayConfig, testCredentials } from '../services/razorpay.js';
+import { encryptSecret, maskSecret } from '../utils/secretBox.js';
 
 // Plans & Billing for the platform operator (Super Admin only): the plans and
 // what each includes, the trial and grace settings, every client's
@@ -141,8 +142,111 @@ router.delete('/plans/:id', async (req, res) => {
 
 // --- settings ---------------------------------------------------------------
 
+// The settings without the stored (encrypted) Razorpay secrets — those never
+// leave the server, not even encrypted.
+const publicSettings = (settings) => {
+  const { razorpay, ...rest } = settings || {};
+  return rest;
+};
+
+// What the panel shows about the Razorpay connection: which key, whether each
+// secret is set (as a masked hint), test or live, and where it came from.
+const razorpayStatus = async () => {
+  const cfg = await getRazorpayConfig();
+  const stored = (await getBillingSettings()).razorpay || {};
+  return {
+    configured: cfg.configured,
+    source: cfg.source, // panel | env | none
+    mode: cfg.mode, // test | live | null
+    keyId: cfg.keyId,
+    keySecretHint: maskSecret(cfg.keySecret),
+    // A secret was saved but cannot be decrypted — the server's
+    // JWT_SECRET / SETTINGS_ENCRYPTION_KEY changed since. Re-enter it.
+    unreadable: Boolean(stored.keySecretEnc && !cfg.keySecret && cfg.source !== 'env'),
+    verifiedAt: stored.verifiedAt || null,
+    updatedAt: stored.updatedAt || null
+  };
+};
+
 router.get('/settings', async (req, res) => {
-  res.json({ success: true, settings: await getBillingSettings(), razorpayReady: razorpayConfigured(), webhookReady: Boolean(process.env.RAZORPAY_WEBHOOK_SECRET) });
+  res.json({ success: true, settings: publicSettings(await getBillingSettings()), razorpay: await razorpayStatus() });
+});
+
+// PUT /api/admin/billing/razorpay { keyId, keySecret? }
+// Saves the Razorpay credentials. A new key id or key secret is tested
+// against Razorpay before it is stored, so a typo cannot silently break
+// every checkout. Leave a secret blank to keep the one already saved.
+router.put('/razorpay', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const keyId = String(body.keyId || '').trim();
+    const keySecret = String(body.keySecret || '').trim();
+    if (!/^rzp_(test|live)_[A-Za-z0-9]+$/.test(keyId)) {
+      return res.status(400).json({ success: false, error: 'Key Id looks like rzp_test_… or rzp_live_… (Razorpay Dashboard → Account & Settings → API Keys)' });
+    }
+
+    const current = await getRazorpayConfig();
+    // Blank secret = keep the saved one, but only if it belongs to the same key.
+    const secretToUse = keySecret || (current.keyId === keyId ? current.keySecret : '');
+    if (!secretToUse) return res.status(400).json({ success: false, error: 'Enter the Key Secret for this Key Id' });
+
+    try {
+      await testCredentials(keyId, secretToUse);
+    } catch (error) {
+      return res.status(400).json({
+        success: false,
+        error: error.status === 401 ? 'Razorpay rejected these keys — check the Key Id and Key Secret' : `Could not reach Razorpay to check the keys: ${error.message}`
+      });
+    }
+
+    const updates = {
+      'razorpay.keyId': keyId,
+      'razorpay.verifiedAt': new Date(),
+      'razorpay.updatedAt': new Date(),
+      'razorpay.updatedBy': req.user._id
+    };
+    if (keySecret || current.source !== 'panel') updates['razorpay.keySecretEnc'] = encryptSecret(secretToUse);
+
+    await getBillingSettings(); // make sure the document exists
+    await BillingSetting.updateOne({ singleton: 'billing' }, { $set: updates });
+    invalidateRazorpayConfig();
+
+    const status = await razorpayStatus();
+    // The secrets themselves are never written to the audit log.
+    await audit(req, 'Razorpay', `Razorpay ${status.mode || ''} keys saved (${keyId})`.replace('  ', ' '), [
+      { field: 'razorpay.keyId', label: 'Key Id', from: current.keyId || null, to: keyId }
+    ]);
+    res.json({ success: true, message: `Razorpay connected in ${status.mode} mode`, razorpay: status });
+  } catch (error) {
+    console.error('[admin-billing] razorpay save failed:', error.message);
+    res.status(500).json({ success: false, error: 'Failed to save the Razorpay keys' });
+  }
+});
+
+// POST /api/admin/billing/razorpay/test — re-check the saved keys.
+router.post('/razorpay/test', async (req, res) => {
+  const cfg = await getRazorpayConfig();
+  if (!cfg.configured) return res.status(400).json({ success: false, error: 'No Razorpay keys are saved yet' });
+  try {
+    await testCredentials(cfg.keyId, cfg.keySecret);
+    await BillingSetting.updateOne({ singleton: 'billing' }, { $set: { 'razorpay.verifiedAt': new Date() } });
+    invalidateRazorpayConfig();
+    res.json({ success: true, message: `Connected to Razorpay (${cfg.mode} mode)`, razorpay: await razorpayStatus() });
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.status === 401 ? 'Razorpay rejected the saved keys' : `Could not reach Razorpay: ${error.message}` });
+  }
+});
+
+// DELETE /api/admin/billing/razorpay — forget the keys saved in the panel
+// (the server then falls back to .env, if anything is set there).
+router.delete('/razorpay', async (req, res) => {
+  await BillingSetting.updateOne(
+    { singleton: 'billing' },
+    { $set: { 'razorpay.keyId': '', 'razorpay.keySecretEnc': '', 'razorpay.webhookSecretEnc': '', 'razorpay.verifiedAt': null, 'razorpay.updatedAt': new Date(), 'razorpay.updatedBy': req.user._id } }
+  );
+  invalidateRazorpayConfig();
+  await audit(req, 'Razorpay', 'Razorpay keys removed from the panel');
+  res.json({ success: true, message: 'Razorpay keys removed', razorpay: await razorpayStatus() });
 });
 
 router.put('/settings', async (req, res) => {
@@ -174,7 +278,7 @@ router.put('/settings', async (req, res) => {
       'Billing settings updated',
       Object.keys(updates).map((k) => ({ field: k, label: k, from: before[k], to: settings[k] }))
     );
-    res.json({ success: true, settings, note: 'A new trial length applies to accounts created from now on; use "Extend trial" for existing ones.' });
+    res.json({ success: true, settings: publicSettings(settings), note: 'A new trial length applies to accounts created from now on; use "Extend trial" for existing ones.' });
   } catch (error) {
     res.status(500).json({ success: false, error: 'Failed to save billing settings' });
   }

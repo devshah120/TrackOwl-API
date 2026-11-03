@@ -16,8 +16,7 @@ import {
   applyPayment
 } from '../services/subscriptions.js';
 import {
-  razorpayConfigured,
-  razorpayKeyId,
+  getRazorpayConfig,
   createOrder,
   fetchPayment,
   verifyCheckoutSignature,
@@ -92,7 +91,7 @@ router.get('/', protect, async (req, res) => {
       })),
       history: (sub.history || []).slice(-20).reverse(),
       canPay: req.user.role === 'company_admin',
-      razorpayReady: razorpayConfigured()
+      razorpayReady: (await getRazorpayConfig()).configured
     });
   } catch (error) {
     console.error('[subscription] read failed:', error.message);
@@ -105,7 +104,8 @@ router.get('/', protect, async (req, res) => {
 // server; the browser never states a price.
 router.post('/checkout', protect, requireCompanyAdmin, async (req, res) => {
   try {
-    if (!razorpayConfigured()) {
+    const razorpay = await getRazorpayConfig();
+    if (!razorpay.configured) {
       return res.status(503).json({ success: false, error: 'Online payment is not set up yet. Please contact support.' });
     }
     const cycle = req.body?.cycle === 'yearly' ? 'yearly' : 'monthly';
@@ -150,7 +150,7 @@ router.post('/checkout', protect, requireCompanyAdmin, async (req, res) => {
     const owner = await User.findById(req.accountId).select('name email mobile company').lean();
     res.json({
       success: true,
-      keyId: razorpayKeyId(),
+      keyId: razorpay.keyId,
       orderId: order.id,
       amount: amountPaise,
       currency: 'INR',
@@ -173,7 +173,7 @@ router.post('/verify', protect, async (req, res) => {
     const payment = await SubscriptionPayment.findOne({ razorpayOrderId: orderId, owner: req.accountId });
     if (!payment) return res.status(404).json({ success: false, error: 'Payment not found' });
 
-    if (!verifyCheckoutSignature({ orderId, paymentId, signature })) {
+    if (!(await verifyCheckoutSignature({ orderId, paymentId, signature }))) {
       await SubscriptionPayment.updateOne({ _id: payment._id, status: 'created' }, { $set: { status: 'failed', failureReason: 'Signature mismatch' } });
       return res.status(400).json({ success: false, error: 'The payment could not be verified. If money was deducted it will be refunded by Razorpay.' });
     }
@@ -222,7 +222,7 @@ router.post('/failed', protect, async (req, res) => {
 // https://<your host>/api/subscription/webhook. The backstop for a customer
 // who paid and closed the tab before the browser could call /verify.
 router.post('/webhook', async (req, res) => {
-  if (!verifyWebhookSignature(req.rawBody, req.get('X-Razorpay-Signature'))) {
+  if (!(await verifyWebhookSignature(req.rawBody, req.get('X-Razorpay-Signature')))) {
     return res.status(400).json({ success: false, error: 'Invalid signature' });
   }
   try {

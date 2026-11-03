@@ -6,6 +6,7 @@ import Truck from '../models/Truck.js';
 import User from '../models/User.js';
 import Notification from '../models/Notification.js';
 import { sendAlertDigestEmail } from './emailService.js';
+import { getRazorpayConfig, fetchOrderPayments } from './razorpay.js';
 
 // Plans, trials, paid periods and what an account may do because of them.
 //
@@ -341,4 +342,54 @@ export const billingReminders = async (owner) => {
   if (account?.email && notification) {
     await sendAlertDigestEmail([account.email], account.company, [notification.toObject()], process.env.APP_URL || '');
   }
+};
+
+// --- reconciliation (instead of a webhook) ---------------------------------
+
+/**
+ * Checkouts that were started but never confirmed by the browser — the
+ * customer paid and closed the tab, or their connection dropped before the
+ * success callback reached us. Run by the scheduler every few minutes: for
+ * each such order from the last 24 hours, ask Razorpay whether it was paid,
+ * and if a payment was captured, apply it exactly as /verify would have.
+ *
+ * Orders are only looked at once they are 2 minutes old, so a checkout still
+ * open in someone's browser is left alone; after 24 hours an unpaid order is
+ * given up on (it is still visible to the Super Admin as "Started, not paid").
+ */
+export const reconcilePendingPayments = async () => {
+  const cfg = await getRazorpayConfig();
+  if (!cfg.configured) return { checked: 0, applied: 0 };
+
+  const now = Date.now();
+  const pending = await SubscriptionPayment.find({
+    status: 'created',
+    createdAt: { $lte: new Date(now - 2 * 60 * 1000), $gte: new Date(now - 24 * 60 * 60 * 1000) }
+  })
+    .sort({ createdAt: 1 })
+    .limit(50)
+    .lean();
+
+  let applied = 0;
+  for (const p of pending) {
+    try {
+      const { items = [] } = await fetchOrderPayments(p.razorpayOrderId);
+      const captured = items.find((i) => i.status === 'captured');
+      if (captured) {
+        const result = await applyPayment(p.razorpayOrderId, { paymentId: captured.id, method: captured.method || '' });
+        if (!result.alreadyApplied) {
+          applied += 1;
+          console.log(`[billing] reconciled order ${p.razorpayOrderId} → payment ${captured.id}`);
+        }
+      } else {
+        const failed = items.filter((i) => i.status === 'failed').pop();
+        if (failed?.error_description && !p.failureReason) {
+          await SubscriptionPayment.updateOne({ _id: p._id, status: 'created' }, { $set: { failureReason: String(failed.error_description).slice(0, 300) } });
+        }
+      }
+    } catch (error) {
+      console.error(`[billing] reconcile ${p.razorpayOrderId} failed:`, error.message);
+    }
+  }
+  return { checked: pending.length, applied };
 };

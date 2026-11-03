@@ -2,7 +2,7 @@ import User from '../models/User.js';
 import Notification from '../models/Notification.js';
 import { ROLES } from '../utils/permissions.js';
 import { synthesizeNotifications } from './notificationSynth.js';
-import { billingReminders } from './subscriptions.js';
+import { billingReminders, reconcilePendingPayments } from './subscriptions.js';
 import { getAlertSettings } from './gpsAlerts.js';
 import { sendAlertDigestEmail } from './emailService.js';
 import { emitEvent } from './webhooks.js';
@@ -35,7 +35,8 @@ const status = {
   started: false,
   disabled: false,
   scan: { lastFinishedAt: null, lastError: null, accounts: 0 },
-  delivery: { lastFinishedAt: null, lastError: null, delivered: 0 }
+  delivery: { lastFinishedAt: null, lastError: null, delivered: 0 },
+  reconcile: { lastFinishedAt: null, lastError: null, checked: 0, applied: 0 }
 };
 
 export const schedulerStatus = () => {
@@ -78,6 +79,23 @@ export const runScan = async () => {
     console.error('[scheduler] scan failed:', error.message);
   } finally {
     scanning = false;
+  }
+};
+
+// Razorpay checkouts the browser never confirmed (no webhook is configured,
+// so this is how a customer who paid and closed the tab still gets the plan).
+let reconciling = false;
+export const runReconcile = async () => {
+  if (reconciling) return;
+  reconciling = true;
+  try {
+    const result = await reconcilePendingPayments();
+    status.reconcile = { lastFinishedAt: new Date(), lastError: null, ...result };
+  } catch (error) {
+    status.reconcile = { lastFinishedAt: new Date(), lastError: error.message };
+    console.error('[scheduler] payment reconcile failed:', error.message);
+  } finally {
+    reconciling = false;
   }
 };
 
@@ -158,6 +176,7 @@ export const startScheduler = () => {
   setTimeout(runScan, 60 * 1000).unref();
   setInterval(runScan, SCAN_EVERY_MS).unref();
   setInterval(runDelivery, DELIVER_EVERY_MS).unref();
+  setInterval(runReconcile, 3 * 60 * 1000).unref();
   status.started = true;
-  console.log('✓ Scheduler started (alert scan every 10 min, delivery every 1 min)');
+  console.log('✓ Scheduler started (alert scan every 10 min, delivery every 1 min, payment check every 3 min)');
 };

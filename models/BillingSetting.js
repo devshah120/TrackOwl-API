@@ -17,6 +17,20 @@ const billingSettingSchema = new mongoose.Schema({
   // Renewal reminders, in days before the period ends.
   reminderDays: { type: [Number], default: () => [7, 3, 1] },
 
+  // Razorpay credentials, entered in the Super Admin panel. The key secret is
+  // stored encrypted (utils/secretBox.js) and never sent to a browser. When
+  // empty, the server falls back to the RAZORPAY_* values in .env.
+  // `webhookSecretEnc` is unused — no webhook is configured.
+  razorpay: {
+    keyId: { type: String, trim: true, default: '' },
+    keySecretEnc: { type: String, default: '' },
+    webhookSecretEnc: { type: String, default: '' },
+    // Last successful "Test connection".
+    verifiedAt: { type: Date, default: null },
+    updatedAt: { type: Date, default: null },
+    updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null }
+  },
+
   updatedAt: { type: Date, default: Date.now },
   updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null }
 });
