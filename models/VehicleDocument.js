@@ -17,6 +17,7 @@ export const VEHICLE_DOCUMENT_TYPES = [
   'Fitness',
   'Permit',
   'Tax',
+  'FASTag',
   'Other'
 ];
 
@@ -29,6 +30,7 @@ export const VEHICLE_DOCUMENT_LABELS = {
   Fitness: 'Fitness Certificate',
   Permit: 'Permit',
   Tax: 'Road Tax',
+  FASTag: 'FASTag',
   Other: 'Other'
 };
 
@@ -78,6 +80,9 @@ const vehicleDocumentSchema = new mongoose.Schema({
   // The date the expiry scan works off. Optional because an RC does not expire
   // in the way a PUC does — a document with no expiry is simply never chased.
   expiryDate: { type: Date, index: true },
+  // This document's own reminder stages, in days before expiry (brief §4
+  // "reminder settings"). Empty = the account's stages (Alert Settings).
+  reminderDays: { type: [Number], default: undefined },
   notes: { type: String, trim: true, default: '' },
 
   attachment: { type: attachmentSchema, default: () => ({}) },

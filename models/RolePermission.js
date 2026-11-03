@@ -38,6 +38,11 @@ const rolePermissionSchema = new mongoose.Schema({
 
   // Who last changed this role, and when. The matrix is a security control, so
   // it is worth being able to answer "who widened the Driver role?".
+  // One-off grant migrations already applied to this row, so each runs once
+  // and an admin's later decision to remove the grant is not undone on the
+  // next restart. See services/rolePermissions.js.
+  appliedMigrations: { type: [String], default: [] },
+
   updatedBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',

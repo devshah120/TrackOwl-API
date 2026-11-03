@@ -16,6 +16,7 @@ export const ROLES = {
   SUPER_ADMIN: 'super_admin',
   COMPANY_ADMIN: 'company_admin',
   FLEET_MANAGER: 'fleet_manager',
+  TRANSPORT_MANAGER: 'transport_manager',
   ACCOUNTANT: 'accountant',
   VIEWER: 'viewer',
   DRIVER: 'driver'
@@ -27,6 +28,7 @@ export const ROLE_VALUES = Object.values(ROLES);
 // (platform-level) and cannot create a second company_admin — an account has
 // exactly one owner, which keeps `User.account` a single unambiguous hop.
 export const ASSIGNABLE_ROLES = [
+  ROLES.TRANSPORT_MANAGER,
   ROLES.FLEET_MANAGER,
   ROLES.ACCOUNTANT,
   ROLES.VIEWER,
@@ -38,6 +40,7 @@ export const ROLE_LABELS = {
   [ROLES.SUPER_ADMIN]: 'Super Admin',
   [ROLES.COMPANY_ADMIN]: 'Company Admin',
   [ROLES.FLEET_MANAGER]: 'Fleet Manager',
+  [ROLES.TRANSPORT_MANAGER]: 'Transport Manager',
   [ROLES.ACCOUNTANT]: 'Accountant',
   [ROLES.VIEWER]: 'Viewer',
   [ROLES.DRIVER]: 'Driver'
@@ -73,7 +76,12 @@ export const RESOURCES = [
 
 // Actions, coarsest first. `manage` is the write-plus-destroy grant; a role
 // holding it implicitly holds read.
-export const ACTIONS = ['read', 'create', 'update', 'delete', 'manage'];
+// `approve` gates sign-off actions — closing a trip past failing checks,
+// cancelling an invoice, writing a balance off. `export` gates downloading a
+// report as Excel or PDF, which takes data out of the account. `manage` still
+// implies every action, so a role holding resource:manage or resource:* needs
+// no change.
+export const ACTIONS = ['read', 'create', 'update', 'delete', 'approve', 'export', 'manage'];
 
 // The two roles whose grants are fixed in code. They are the way back in when a
 // matrix edit goes wrong: if a Super Admin could strip their own access, or a
@@ -99,6 +107,27 @@ export const DEFAULT_GRANTS = {
   // Runs the fleet day to day: vehicles, drivers, trips and tracking are theirs
   // to change. They can see costs (a trip's fuel spend is operational) but not
   // edit the books, and they cannot invoice.
+  // Transport Manager (brief §13): runs the trip operation — trips, vehicles,
+  // drivers, customers and tracking — and sees, but does not keep, fuel,
+  // maintenance and billing.
+  [ROLES.TRANSPORT_MANAGER]: [
+    'trips:*',
+    'trucks:*',
+    'drivers:*',
+    'customers:*',
+    'tracking:*',
+    'fuel:read',
+    'fuel:create',
+    'maintenance:read',
+    'maintenance:create',
+    'billing:read',
+    'ledger:read',
+    'company:read',
+    'reports:read',
+    'reports:export',
+    'users:read'
+  ],
+
   [ROLES.FLEET_MANAGER]: [
     'trucks:*',
     'drivers:*',
@@ -116,6 +145,7 @@ export const DEFAULT_GRANTS = {
     'billing:read',
     'company:read',
     'reports:read',
+    'reports:export',
     'users:read'
   ],
 
@@ -142,6 +172,7 @@ export const DEFAULT_GRANTS = {
     'drivers:read',
     'company:read',
     'reports:read',
+    'reports:export',
     'users:read'
   ],
 

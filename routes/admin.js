@@ -334,6 +334,17 @@ const readDeviceMaster = (body = {}) => {
   str('model', body.model);
   str('manufacturer', body.manufacturer);
   str('firmwareVersion', body.firmwareVersion);
+  if (body.protocol !== undefined) master.protocol = String(body.protocol).trim().toLowerCase();
+
+  // Programmed configuration. Numbers are optional; blank clears them.
+  if (body.configuration && typeof body.configuration === 'object') {
+    const c = body.configuration;
+    const num = (v) => (v === '' || v === null || v === undefined ? null : Number(v));
+    const config = {};
+    for (const key of ['serverHost', 'apn', 'notes']) if (c[key] !== undefined) config[key] = String(c[key]).trim();
+    for (const key of ['serverPort', 'movingIntervalSec', 'stoppedIntervalSec']) if (c[key] !== undefined) config[key] = num(c[key]);
+    if (Object.keys(config).length) master.configuration = config;
+  }
   str('installedBy', body.installedBy);
   str('notes', body.notes);
   if (body.imei !== undefined) master.imei = String(body.imei).replace(/\D/g, '');
@@ -360,6 +371,12 @@ const readDeviceMaster = (body = {}) => {
 const validateDeviceMaster = (master) => {
   if (master.lifecycleStatus && !DEVICE_LIFECYCLE_STATUSES.includes(master.lifecycleStatus)) {
     return `Status must be one of: ${DEVICE_LIFECYCLE_STATUSES.join(', ')}`;
+  }
+  for (const key of ['serverPort', 'movingIntervalSec', 'stoppedIntervalSec']) {
+    const v = master.configuration?.[key];
+    if (v !== undefined && v !== null && (!Number.isFinite(v) || v < 1 || (key.endsWith('Port') ? v > 65535 : v > 86400))) {
+      return key.endsWith('Port') ? 'Server port must be between 1 and 65535' : 'Reporting interval must be between 1 second and 1 day';
+    }
   }
   if (master.imei && !/^\d{15,17}$/.test(master.imei)) {
     return 'IMEI must be 15-17 digits';
@@ -525,9 +542,11 @@ router.put('/devices/:id', async (req, res) => {
 
     // SIM is a subdocument: merge the submitted keys instead of replacing the
     // whole thing, so a form that omits the ICCID does not wipe it.
-    const { sim, ...flat } = master;
+    const { sim, configuration, ...flat } = master;
     Object.assign(device, flat);
     if (sim) Object.assign(device.sim, sim);
+    // Merged like the SIM, so a partial form does not wipe the rest.
+    if (configuration) Object.assign(device.configuration, configuration);
 
     if (req.body.vehicle !== undefined) {
       const linkError = await linkDeviceToVehicle(device, req.body.vehicle || null);

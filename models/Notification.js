@@ -18,14 +18,28 @@ const notificationSchema = new mongoose.Schema({
   },
   severity: {
     type: String,
-    enum: ['critical', 'warning'],
+    enum: ['critical', 'warning', 'info'],
     default: undefined
   },
+  // What raised it — lets the Alerts screen filter "overspeed only" or
+  // "compliance only". Older rows predate this and carry ''.
+  category: { type: String, trim: true, default: '', index: true },
   title: { type: String, required: true, trim: true },
   message: { type: String, required: true, trim: true },
   vehicle: { type: String, trim: true, default: '' },
   read: { type: Boolean, default: false },
+  // "Seen" and "dealt with" are different: an expiring permit is read the day
+  // it appears and acknowledged when somebody has actually booked the renewal.
+  acknowledgedAt: { type: Date, default: null },
+  acknowledgedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  acknowledgedByName: { type: String, trim: true, default: '' },
+  // Where the alert happened, for GPS-raised alerts.
+  lat: { type: Number, default: null },
+  lng: { type: Number, default: null },
   dedupeKey: { type: String, index: true },
+  // When the background scheduler handed this alert to email / webhooks.
+  // Null = not yet delivered. See services/scheduler.js.
+  deliveredAt: { type: Date, default: null },
 
   createdAt: { type: Date, default: Date.now, index: true }
 });

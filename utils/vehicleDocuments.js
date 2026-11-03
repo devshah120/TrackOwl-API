@@ -1,3 +1,5 @@
+import { ALLOWED_UPLOAD_TYPES, UPLOAD_TYPE_ERROR } from './validators.js';
+
 // Shared helpers for the two document collections — VehicleDocument (RC,
 // insurance, PUC, fitness, permit, tax) and DriverDocument (licence, ID,
 // training). The two models are deliberately separate, but the field shaping,
@@ -56,6 +58,12 @@ export const buildDocumentFields = (body, types) => {
   if (body.notes !== undefined) fields.notes = String(body.notes || '').trim();
   if (body.issueDate !== undefined) fields.issueDate = body.issueDate || null;
   if (body.expiryDate !== undefined) fields.expiryDate = body.expiryDate || null;
+  // "30, 7, 0" or [30, 7, 0]; blank means "use the account's stages".
+  if (body.reminderDays !== undefined) {
+    const list = Array.isArray(body.reminderDays) ? body.reminderDays : String(body.reminderDays || '').split(',');
+    fields.reminderDays = [...new Set(list.map((d) => Math.round(Number(String(d).trim()))).filter((n) => Number.isFinite(n) && n >= 0 && n <= 365))]
+      .sort((a, b) => b - a);
+  }
 
   if (body.attachment !== undefined) {
     const a = body.attachment;
@@ -79,6 +87,7 @@ export const validateAttachment = (attachment) => {
   if (!/^data:/.test(attachment.dataUrl)) {
     return 'The document copy must be an uploaded file';
   }
+  if (!ALLOWED_UPLOAD_TYPES.test(attachment.dataUrl)) return `The document copy ${UPLOAD_TYPE_ERROR}`;
   if (attachment.dataUrl.length > MAX_ATTACHMENT_CHARS) {
     return 'That file is too large — please upload a document under 3 MB';
   }

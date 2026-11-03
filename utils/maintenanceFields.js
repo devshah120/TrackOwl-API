@@ -1,3 +1,4 @@
+import { ALLOWED_UPLOAD_TYPES, UPLOAD_TYPE_ERROR } from './validators.js';
 import mongoose from 'mongoose';
 import {
   SERVICE_TYPES,
@@ -93,6 +94,7 @@ export const cleanInvoice = (input) => {
 export const validateDataUrl = (dataUrl, { max = MAX_INVOICE_CHARS, label = 'invoice' } = {}) => {
   if (!dataUrl) return null;
   if (!/^data:/.test(String(dataUrl))) return `The ${label} must be an uploaded file`;
+  if (!ALLOWED_UPLOAD_TYPES.test(String(dataUrl))) return `The ${label} ${UPLOAD_TYPE_ERROR}`;
   if (String(dataUrl).length > max) {
     return `That ${label} is too large — please keep it under ${Math.round((max / (1024 * 1024)) * 0.75)} MB`;
   }

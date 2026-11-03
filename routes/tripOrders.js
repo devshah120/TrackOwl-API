@@ -4,7 +4,8 @@ import Customer from '../models/Customer.js';
 import Truck from '../models/Truck.js';
 import Driver from '../models/Driver.js';
 import Trip from '../models/Trip.js';
-import { protect, requirePermission } from '../middleware/auth.js';
+import Notification from '../models/Notification.js';
+import { protect, requirePermission, requireTripUpdateOrDriver, isDriverSeat } from '../middleware/auth.js';
 import { hasPermission } from '../utils/permissions.js';
 import { auditCreate, auditUpdate, auditDelete, recordAudit } from '../utils/audit.js';
 import {
@@ -14,6 +15,7 @@ import {
   TRIP_STATUS_LABELS,
   STATUS_TRANSITIONS,
   TERMINAL_STATUSES,
+  SETTLEMENT_STATUSES,
   ACTIVE_STATUSES,
   LEGACY_TRIP_STATUS,
   STOP_TYPES,
@@ -53,18 +55,27 @@ import {
   MAX_SIGNATURE_CHARS
 } from '../utils/tripOrderFields.js';
 import { applyTotals, computeProfitability, computeVariance } from '../services/tripFinance.js';
+import { computeSettlement, closeChecks, settlementSignature } from '../services/tripSettlement.js';
+import { DRIVER_MONEY_KINDS } from '../models/TripOrder.js';
 import {
   validateVehicleAssignment,
   validateDriverAssignment,
   validateCapacity
 } from '../services/tripAssignment.js';
 import { createWithTripNumber, previewTripNumber } from '../services/tripNumber.js';
+import { emitEvent } from '../services/webhooks.js';
 
 const router = express.Router();
 
 // Every trip belongs to the caller's account, like every other business record
 // here. Applied to the query itself rather than filtered after the read.
-const ownedBy = (req) => ({ owner: req.accountId });
+//
+// A Driver seat is narrowed further, to the trips it is assigned to drive —
+// see middleware/auth.js for how the seat finds its Driver profile.
+const ownedBy = (req) => ({
+  owner: req.accountId,
+  ...(isDriverSeat(req) ? { driver: req.driverProfileId } : {})
+});
 
 // How a trip names itself in the audit trail. The number is the office's own
 // reference, so a log line reads the way a person would say it out loud.
@@ -79,6 +90,19 @@ const POPULATE = [
   { path: 'driver', select: 'name mobile licenseNumber licenseExpiry status' },
   { path: 'crew.employee', select: 'name mobile licenseNumber' }
 ];
+
+// The body of a trip webhook event (services/webhooks.js).
+const tripEventPayload = (trip, extra = {}) => ({
+  id: String(trip._id),
+  tripNumber: trip.tripNumber,
+  status: trip.status,
+  vehicleNumber: trip.vehicleNumber || '',
+  driverName: trip.driverName || '',
+  customer: trip.customer?.name || (trip.customer ? String(trip.customer) : ''),
+  pickup: trip.pickup?.city || trip.pickup?.name || '',
+  destination: trip.destination?.city || trip.destination?.name || '',
+  ...extra
+});
 
 // Loads one of the caller's trips, or null. Every sub-resource handler starts
 // here, so ownership is enforced in exactly one place.
@@ -189,12 +213,12 @@ const syncResourceStatus = async (trip, { releasing = false } = {}) => {
   }
 };
 
-// May this seat push an assignment past a blocker? `trips:manage` is the
-// write-plus-destroy grant, so it is the closest thing the existing matrix has
-// to "senior enough to take responsibility for an exception". Read through
-// hasPermission rather than by naming roles, so a Super Admin editing the
-// matrix changes who can override without a code change.
-const canOverride = (req) => hasPermission(req.user?.role, 'trips', 'manage');
+// May this seat push past a blocker — an assignment clash, or closing a trip
+// with checks outstanding? That is what `trips:approve` is for; `manage` and
+// `*` imply it, so the roles that could override before still can. Read
+// through hasPermission rather than by naming roles, so a Super Admin editing
+// the matrix changes who can override without a code change.
+const canOverride = (req) => hasPermission(req.user?.role, 'trips', 'approve');
 
 // Expense lines without their receipt images. A trip with twenty fuel bills
 // carries megabytes of base64 that no list view renders; `hasReceipt` says one
@@ -527,6 +551,7 @@ router.get('/:id', protect, requirePermission('trips', 'read'), async (req, res)
       trip: lean,
       profitability: computeProfitability(trip),
       variance: computeVariance(trip),
+      settlement: settlementPayload(trip),
       // Signature and photo live behind their own endpoints; these say whether
       // there is anything to fetch.
       podMedia: {
@@ -538,7 +563,9 @@ router.get('/:id', protect, requirePermission('trips', 'read'), async (req, res)
       allowedTransitions: trip.status === 'on_hold'
         ? [trip.heldFrom || 'planned', 'cancelled']
         : [...(STATUS_TRANSITIONS[trip.status] || []),
-           ...(TERMINAL_STATUSES.includes(trip.status) ? [] : ['on_hold', 'cancelled'])]
+           ...(TERMINAL_STATUSES.includes(trip.status) || SETTLEMENT_STATUSES.includes(trip.status)
+             ? []
+             : ['on_hold', 'cancelled'])]
     });
   } catch (error) {
     console.error('[trip-orders] fetch failed:', error.message);
@@ -707,6 +734,7 @@ router.post('/:id/status', protect, requirePermission('trips', 'update'), async 
       ]
     });
 
+    emitEvent(req.accountId, 'trip.status_changed', tripEventPayload(trip, { from, to, reason: String(req.body.reason || '').trim() }));
     res.json({ success: true, trip: await trip.populate(POPULATE) });
   } catch (error) {
     console.error('[trip-orders] status change failed:', error.message);
@@ -714,6 +742,383 @@ router.post('/:id/status', protect, requirePermission('trips', 'update'), async 
   }
 });
 
+
+// ---------------------------------------------------------------------------
+// Settlement — driver money, reading corrections, review and close
+// ---------------------------------------------------------------------------
+
+const DRIVER_MONEY_LABELS = {
+  advance: 'Advance',
+  settlement_payment: 'Settlement payment',
+  recovery: 'Recovery from driver'
+};
+
+// The settlement block the detail page renders: figures, the driver's account,
+// the close checklist, and the record of review/close.
+const settlementPayload = (trip) => ({
+  ...computeSettlement(trip),
+  checks: closeChecks(trip),
+  review: {
+    reviewedAt: trip.settlement?.reviewedAt || null,
+    reviewedByName: trip.settlement?.reviewedByName || '',
+    reviewNotes: trip.settlement?.reviewNotes || '',
+    current: Boolean(trip.settlement?.reviewedAt) &&
+      trip.settlement.reviewedSignature === settlementSignature(trip)
+  },
+  closed: trip.status === 'closed'
+    ? {
+        closedAt: trip.settlement?.closedAt || null,
+        closedByName: trip.settlement?.closedByName || '',
+        override: trip.settlement?.override || null
+      }
+    : null,
+  driverMoney: (trip.driverMoney || []).map((m) => (m.toObject ? m.toObject() : m)),
+  readingCorrections: trip.readingCorrections || []
+});
+
+// GET /api/trip-orders/:id/settlement
+router.get('/:id/settlement', protect, requirePermission('trips', 'read'), async (req, res) => {
+  try {
+    const trip = await findTrip(req).select('-documents.dataUrl -pod.signature -pod.photo -expenses.receipt').lean();
+    if (!trip) return res.status(404).json({ success: false, error: 'Trip not found' });
+    res.json({
+      success: true,
+      settlement: settlementPayload(trip),
+      canOverride: canOverride(req),
+      moneyKinds: Object.entries(DRIVER_MONEY_LABELS).map(([value, label]) => ({ value, label }))
+    });
+  } catch (error) {
+    console.error('[trip-orders] settlement read failed:', error.message);
+    res.status(500).json({ success: false, error: 'Failed to load settlement' });
+  }
+});
+
+// POST /api/trip-orders/:id/driver-money — record an advance, a settlement
+// payment, or a recovery.
+//
+// A second identical entry (same kind, amount and reference within two
+// minutes) is refused as a double submission unless `confirmDuplicate` is
+// sent — the brief's "prevent duplicate deductions".
+router.post('/:id/driver-money', protect, requirePermission('trips', 'update'), async (req, res) => {
+  try {
+    const trip = await findTrip(req);
+    if (!trip) return res.status(404).json({ success: false, error: 'Trip not found' });
+    if (guardTerminal(trip, res)) return;
+    if (!trip.driver) {
+      return res.status(409).json({ success: false, error: 'Assign a driver before recording driver payments' });
+    }
+
+    const body = req.body || {};
+    const kind = DRIVER_MONEY_KINDS.includes(body.kind) ? body.kind : 'advance';
+    const amount = Math.round(Number(body.amount) * 100) / 100;
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return res.status(400).json({ success: false, error: 'Enter an amount greater than zero' });
+    }
+    const paidAt = body.paidAt ? new Date(body.paidAt) : new Date();
+    if (Number.isNaN(paidAt.getTime())) return res.status(400).json({ success: false, error: 'Invalid payment date' });
+    const reference = String(body.reference || '').trim();
+
+    const recentTwin = trip.driverMoney.find(
+      (m) =>
+        m.kind === kind &&
+        m.amount === amount &&
+        (m.reference || '') === reference &&
+        Date.now() - new Date(m.createdAt).getTime() < 2 * 60 * 1000
+    );
+    if (recentTwin && !body.confirmDuplicate) {
+      return res.status(409).json({
+        success: false,
+        duplicate: true,
+        error: `An identical ${DRIVER_MONEY_LABELS[kind].toLowerCase()} of ₹${amount} was just recorded. Send again only if this is a second payment.`
+      });
+    }
+
+    trip.driverMoney.push({
+      kind,
+      amount,
+      paidAt,
+      paymentMode: PAYMENT_MODES.includes(body.paymentMode) ? body.paymentMode : 'Cash',
+      reference,
+      notes: String(body.notes || '').trim(),
+      createdBy: req.user._id,
+      createdByName: req.user.name || ''
+    });
+    trip.updatedAt = new Date();
+    await trip.save();
+
+    await recordAudit(req, {
+      entity: 'trip_order',
+      entityId: trip._id,
+      action: 'update',
+      label: tripLabel(trip),
+      summary: `${DRIVER_MONEY_LABELS[kind]} of ₹${amount} recorded for ${trip.driverName || 'the driver'} on trip ${trip.tripNumber}`,
+      changes: [{ field: 'driverMoney', label: DRIVER_MONEY_LABELS[kind], from: null, to: amount }]
+    });
+
+    res.status(201).json({ success: true, settlement: settlementPayload(trip) });
+  } catch (error) {
+    if (error.name === 'ValidationError') return res.status(400).json({ success: false, error: error.message });
+    console.error('[trip-orders] driver money failed:', error.message);
+    res.status(500).json({ success: false, error: 'Failed to record the payment' });
+  }
+});
+
+router.delete('/:id/driver-money/:lineId', protect, requirePermission('trips', 'update'), async (req, res) => {
+  try {
+    const trip = await findTrip(req);
+    if (!trip) return res.status(404).json({ success: false, error: 'Trip not found' });
+    if (guardTerminal(trip, res)) return;
+
+    const line = trip.driverMoney.id(req.params.lineId);
+    if (!line) return res.status(404).json({ success: false, error: 'Payment not found' });
+    const { kind, amount } = line;
+    line.deleteOne();
+    trip.updatedAt = new Date();
+    await trip.save();
+
+    await recordAudit(req, {
+      entity: 'trip_order',
+      entityId: trip._id,
+      action: 'update',
+      label: tripLabel(trip),
+      summary: `${DRIVER_MONEY_LABELS[kind]} of ₹${amount} removed from trip ${trip.tripNumber}`,
+      changes: [{ field: 'driverMoney', label: DRIVER_MONEY_LABELS[kind], from: amount, to: null }]
+    });
+
+    res.json({ success: true, settlement: settlementPayload(trip) });
+  } catch (error) {
+    console.error('[trip-orders] driver money delete failed:', error.message);
+    res.status(500).json({ success: false, error: 'Failed to remove the payment' });
+  }
+});
+
+// PUT /api/trip-orders/:id/readings — correct a start or end odometer reading
+// after the fact. A reason is mandatory, and the correction is kept on the trip
+// (readingCorrections) as well as in the audit log.
+router.put('/:id/readings', protect, requirePermission('trips', 'update'), async (req, res) => {
+  try {
+    const trip = await findTrip(req);
+    if (!trip) return res.status(404).json({ success: false, error: 'Trip not found' });
+    if (guardTerminal(trip, res)) return;
+
+    const reason = String(req.body?.reason || '').trim();
+    if (reason.length < 5) {
+      return res.status(400).json({ success: false, error: 'Give a reason for the correction (at least 5 characters)' });
+    }
+
+    const next = { start: trip.start?.odometer ?? null, end: trip.end?.odometer ?? null };
+    const corrections = [];
+    for (const reading of ['start', 'end']) {
+      const raw = req.body?.[reading];
+      if (raw === undefined || raw === null || raw === '') continue;
+      const value = Number(raw);
+      if (!Number.isFinite(value) || value < 0) {
+        return res.status(400).json({ success: false, error: `The ${reading} reading must be a positive number` });
+      }
+      if (!trip[reading]?.at) {
+        return res.status(409).json({
+          success: false,
+          error: `The trip has no ${reading} reading to correct yet — record it with ${reading === 'start' ? 'Start' : 'End'} Trip`
+        });
+      }
+      if (value !== next[reading]) {
+        corrections.push({ reading, from: next[reading], to: value });
+        next[reading] = value;
+      }
+    }
+
+    if (!corrections.length) return res.status(400).json({ success: false, error: 'Nothing to correct — the readings are unchanged' });
+    if (next.start !== null && next.end !== null && next.end < next.start) {
+      return res.status(400).json({
+        success: false,
+        error: `The end reading (${next.end} km) cannot be lower than the start reading (${next.start} km)`
+      });
+    }
+
+    const oldKm = trip.actualKm;
+    for (const c of corrections) {
+      trip[c.reading].odometer = c.to;
+      trip.readingCorrections.push({ ...c, reason, at: new Date(), by: req.user._id, byName: req.user.name || '' });
+    }
+    applyTotals(trip);
+    trip.events.push({
+      eventType: 'manual',
+      severity: 'warning',
+      message: `Odometer corrected (${corrections.map((c) => `${c.reading}: ${c.from ?? '—'} → ${c.to} km`).join(', ')}) — ${reason}`,
+      occurredAt: new Date(),
+      source: 'manual',
+      createdBy: req.user._id
+    });
+    trip.updatedAt = new Date();
+    await trip.save();
+
+    await recordAudit(req, {
+      entity: 'trip_order',
+      entityId: trip._id,
+      action: 'update',
+      label: tripLabel(trip),
+      summary: `Odometer corrected on trip ${trip.tripNumber}: ${reason}`,
+      changes: [
+        ...corrections.map((c) => ({
+          field: `${c.reading}.odometer`,
+          label: c.reading === 'start' ? 'Start Odometer' : 'Final Odometer',
+          from: c.from,
+          to: c.to
+        })),
+        { field: 'actualKm', label: 'Actual Distance (km)', from: oldKm ?? null, to: trip.actualKm ?? null }
+      ]
+    });
+
+    res.json({ success: true, trip: await trip.populate(POPULATE), settlement: settlementPayload(trip) });
+  } catch (error) {
+    console.error('[trip-orders] reading correction failed:', error.message);
+    res.status(500).json({ success: false, error: 'Failed to correct the reading' });
+  }
+});
+
+// POST /api/trip-orders/:id/settlement/review — sign off the settlement
+// figures as they stand. Moves a Completed trip into Pending Settlement. Any
+// later change to a money line or a reading invalidates the review (see
+// settlementSignature), so closing always rests on a review of the final
+// numbers.
+router.post('/:id/settlement/review', protect, requirePermission('trips', 'update'), async (req, res) => {
+  try {
+    const trip = await findTrip(req);
+    if (!trip) return res.status(404).json({ success: false, error: 'Trip not found' });
+    if (!SETTLEMENT_STATUSES.includes(trip.status)) {
+      return res.status(409).json({
+        success: false,
+        error: `A trip can be settled once it is Completed — this one is ${TRIP_STATUS_LABELS[trip.status]}`
+      });
+    }
+
+    const from = trip.status;
+    if (from === 'completed') {
+      trip.status = 'pending_settlement';
+      pushStatusChange(trip, { from, to: 'pending_settlement', req, reason: 'Settlement reviewed' });
+    }
+
+    const figures = computeSettlement(trip);
+    trip.settlement.reviewedAt = new Date();
+    trip.settlement.reviewedBy = req.user._id;
+    trip.settlement.reviewedByName = req.user.name || '';
+    trip.settlement.reviewNotes = String(req.body?.notes || '').trim();
+    trip.settlement.reviewedSignature = settlementSignature(trip);
+    trip.updatedAt = new Date();
+    await trip.save();
+
+    await recordAudit(req, {
+      entity: 'trip_order',
+      entityId: trip._id,
+      action: 'update',
+      label: tripLabel(trip),
+      summary: `Settlement reviewed for trip ${trip.tripNumber}: contribution ₹${figures.contribution}, driver balance ₹${figures.driver.balance}`,
+      changes: [
+        { field: 'settlement.reviewedAt', label: 'Settlement Reviewed', from: null, to: trip.settlement.reviewedAt },
+        ...(from !== trip.status
+          ? [{ field: 'status', label: 'Status', from: TRIP_STATUS_LABELS[from], to: TRIP_STATUS_LABELS[trip.status] }]
+          : [])
+      ]
+    });
+
+    res.json({ success: true, trip: await trip.populate(POPULATE), settlement: settlementPayload(trip) });
+  } catch (error) {
+    console.error('[trip-orders] settlement review failed:', error.message);
+    res.status(500).json({ success: false, error: 'Failed to review the settlement' });
+  }
+});
+
+// POST /api/trip-orders/:id/close — lock the trip.
+//
+// Every close check must pass, except that a seat with the override grant
+// (trips:manage) may close past the failing ones by giving a reason; which
+// checks were skipped is recorded on the trip and in the audit log. The status
+// check is never overridable — only a completed trip can be closed.
+router.post('/:id/close', protect, requirePermission('trips', 'update'), async (req, res) => {
+  try {
+    const trip = await findTrip(req);
+    if (!trip) return res.status(404).json({ success: false, error: 'Trip not found' });
+
+    if (!SETTLEMENT_STATUSES.includes(trip.status)) {
+      return res.status(409).json({
+        success: false,
+        error: `Only a completed trip can be closed — this one is ${TRIP_STATUS_LABELS[trip.status]}`
+      });
+    }
+
+    const failing = closeChecks(trip).filter((c) => !c.ok && c.key !== 'status');
+    const wantsOverride = Boolean(req.body?.override);
+    const reason = String(req.body?.reason || '').trim();
+
+    if (failing.length) {
+      if (!wantsOverride) {
+        return res.status(409).json({
+          success: false,
+          error: `This trip cannot be closed yet: ${failing.map((c) => c.label.toLowerCase()).join('; ')}`,
+          failingChecks: failing.map((c) => c.key),
+          canOverride: canOverride(req)
+        });
+      }
+      if (!canOverride(req)) {
+        return res.status(403).json({ success: false, error: 'Your role cannot close a trip past failing checks' });
+      }
+      if (reason.length < 5) {
+        return res.status(400).json({ success: false, error: 'Give a reason for closing with checks outstanding' });
+      }
+    }
+
+    const from = trip.status;
+    const snapshot = computeSettlement(trip);
+    trip.status = 'closed';
+    trip.settlement.closedAt = new Date();
+    trip.settlement.closedBy = req.user._id;
+    trip.settlement.closedByName = req.user.name || '';
+    trip.settlement.override = {
+      used: failing.length > 0,
+      reason: failing.length ? reason : '',
+      skippedChecks: failing.map((c) => c.key)
+    };
+    trip.settlement.snapshot = snapshot;
+    trip.markModified('settlement.snapshot');
+    pushStatusChange(trip, {
+      from,
+      to: 'closed',
+      req,
+      reason: failing.length ? `Closed by override — ${reason}` : 'Settlement closed'
+    });
+    trip.updatedAt = new Date();
+    await trip.save();
+
+    await mirrorToRoute(trip);
+    await syncResourceStatus(trip, { releasing: true });
+
+    await recordAudit(req, {
+      entity: 'trip_order',
+      entityId: trip._id,
+      action: 'update',
+      label: tripLabel(trip),
+      summary: failing.length
+        ? `Trip ${trip.tripNumber} closed by override (${failing.map((c) => c.key).join(', ')}): ${reason}`
+        : `Trip ${trip.tripNumber} closed — contribution ₹${snapshot.contribution}`,
+      changes: [{ field: 'status', label: 'Status', from: TRIP_STATUS_LABELS[from], to: TRIP_STATUS_LABELS.closed }]
+    });
+
+    emitEvent(req.accountId, 'trip.closed', tripEventPayload(trip, {
+      from,
+      contribution: snapshot.contribution,
+      revenueExTax: snapshot.revenueExTax,
+      expenses: snapshot.expenses,
+      actualKm: snapshot.actualKm,
+      driverBalance: snapshot.driver.balance,
+      override: failing.length > 0
+    }));
+
+    res.json({ success: true, trip: await trip.populate(POPULATE), settlement: settlementPayload(trip) });
+  } catch (error) {
+    console.error('[trip-orders] close failed:', error.message);
+    res.status(500).json({ success: false, error: 'Failed to close the trip' });
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Assignment — vehicle, driver, crew
@@ -1089,7 +1494,7 @@ router.post('/:id/stops', protect, requirePermission('trips', 'update'), async (
 // PATCH /api/trip-orders/:id/stops/:stopId — edit one stop, or move it on:
 // `action` of 'arrive', 'depart', 'complete' or 'skip' stamps the times the
 // operator would otherwise have to type.
-router.patch('/:id/stops/:stopId', protect, requirePermission('trips', 'update'), async (req, res) => {
+router.patch('/:id/stops/:stopId', protect, requireTripUpdateOrDriver, async (req, res) => {
   try {
     const trip = await findTrip(req);
     if (!trip) return res.status(404).json({ success: false, error: 'Trip not found' });
@@ -1156,7 +1561,7 @@ router.patch('/:id/stops/:stopId', protect, requirePermission('trips', 'update')
 });
 
 // PUT /api/trip-orders/:id/stops/:stopId/pod — proof of delivery for one drop.
-router.put('/:id/stops/:stopId/pod', protect, requirePermission('trips', 'update'), async (req, res) => {
+router.put('/:id/stops/:stopId/pod', protect, requireTripUpdateOrDriver, async (req, res) => {
   try {
     const trip = await findTrip(req);
     if (!trip) return res.status(404).json({ success: false, error: 'Trip not found' });
@@ -1454,6 +1859,59 @@ router.post('/:id/expenses', protect, requirePermission('trips', 'update'), asyn
   }
 });
 
+// POST /api/trip-orders/:id/driver-expenses — an expense the driver paid on
+// the road (toll, parking, food, a puncture), entered from the driver app.
+//
+// Open to the Driver seat on its own trip. "Paid by" is forced to the driver,
+// so the line is reimbursed through the trip's settlement; the category is
+// limited to roadside spends — fuel goes through the fuel register (which
+// links it here itself), and the allowance is the office's to set.
+const DRIVER_EXPENSE_CATEGORIES = ['toll', 'parking', 'food', 'hotel', 'loading', 'unloading', 'repair', 'tyre', 'challan', 'miscellaneous'];
+
+router.post('/:id/driver-expenses', protect, requireTripUpdateOrDriver, async (req, res) => {
+  try {
+    const trip = await findTrip(req);
+    if (!trip) return res.status(404).json({ success: false, error: 'Trip not found' });
+    if (guardTerminal(trip, res)) return;
+    if (!DRIVER_EXPENSE_CATEGORIES.includes(req.body?.category)) {
+      return res.status(400).json({ success: false, error: 'Choose toll, parking, food, hotel, loading, unloading, repair, tyre, challan or other' });
+    }
+
+    const line = cleanExpenseLine({ ...req.body, paidBy: 'driver', paymentMode: req.body?.paymentMode || 'Cash' }, req.user?._id || null);
+    if (!line || !(line.amount > 0)) return res.status(400).json({ success: false, error: 'Enter the amount paid' });
+    const receiptError = validateDataUrl(line.receipt.dataUrl, { label: 'receipt' });
+    if (receiptError) return res.status(400).json({ success: false, error: receiptError });
+
+    // The same amount, category and description within two minutes is a
+    // double tap on a phone, not a second toll.
+    const twin = trip.expenses.find(
+      (e) => e.category === line.category && e.amount === line.amount && (e.description || '') === line.description &&
+        Date.now() - new Date(e.createdAt || 0).getTime() < 120000
+    );
+    if (twin && !req.body?.confirmDuplicate) {
+      return res.status(409).json({ success: false, duplicate: true, error: 'This expense was just added. Send again only if it is a second one.' });
+    }
+
+    trip.expenses.push(line);
+    applyTotals(trip);
+    await trip.save();
+
+    await recordAudit(req, {
+      entity: 'trip_order',
+      entityId: trip._id,
+      action: 'update',
+      label: tripLabel(trip),
+      summary: `Driver added ${EXPENSE_CATEGORY_LABELS[line.category]} of ₹${line.amount.toLocaleString('en-IN')} to trip ${trip.tripNumber}`,
+      changes: [{ field: 'totals.expenses', label: 'Total Expenses', from: null, to: trip.totals.expenses }]
+    });
+
+    res.status(201).json({ success: true, expenses: stripReceipts(trip.expenses), totals: trip.totals });
+  } catch (error) {
+    console.error('[trip-orders] driver expense failed:', error.message);
+    res.status(500).json({ success: false, error: 'Failed to add the expense' });
+  }
+});
+
 // PUT /api/trip-orders/:id/expenses/:lineId
 router.put('/:id/expenses/:lineId', protect, requirePermission('trips', 'update'), async (req, res) => {
   try {
@@ -1624,7 +2082,7 @@ router.put('/:id/checklist', protect, requirePermission('trips', 'update'), asyn
 // Captures the starting odometer and fuel, moves the trip to In Transit, and
 // stamps the linked GPS record so its trail starts from this moment rather than
 // from whatever the tracker was doing beforehand.
-router.post('/:id/start', protect, requirePermission('trips', 'update'), async (req, res) => {
+router.post('/:id/start', protect, requireTripUpdateOrDriver, async (req, res) => {
   try {
     const trip = await findTrip(req);
     if (!trip) return res.status(404).json({ success: false, error: 'Trip not found' });
@@ -1706,7 +2164,7 @@ router.post('/:id/start', protect, requirePermission('trips', 'update'), async (
 // The final odometer must not be below the starting one: that is either a typo
 // or a reading from a different vehicle, and accepting it would produce a
 // negative distance that then divides into every per-km figure on the trip.
-router.post('/:id/end', protect, requirePermission('trips', 'update'), async (req, res) => {
+router.post('/:id/end', protect, requireTripUpdateOrDriver, async (req, res) => {
   try {
     const trip = await findTrip(req);
     if (!trip) return res.status(404).json({ success: false, error: 'Trip not found' });
@@ -1798,7 +2256,7 @@ router.post('/:id/end', protect, requirePermission('trips', 'update'), async (re
 // ---------------------------------------------------------------------------
 
 // PUT /api/trip-orders/:id/pod — the trip-level proof of delivery.
-router.put('/:id/pod', protect, requirePermission('trips', 'update'), async (req, res) => {
+router.put('/:id/pod', protect, requireTripUpdateOrDriver, async (req, res) => {
   try {
     const trip = await findTrip(req);
     if (!trip) return res.status(404).json({ success: false, error: 'Trip not found' });
@@ -1870,7 +2328,7 @@ router.get('/:id/pod/media', protect, requirePermission('trips', 'read'), async 
 });
 
 // POST /api/trip-orders/:id/documents — attach a file to the trip.
-router.post('/:id/documents', protect, requirePermission('trips', 'update'), async (req, res) => {
+router.post('/:id/documents', protect, requireTripUpdateOrDriver, async (req, res) => {
   try {
     const trip = await findTrip(req);
     if (!trip) return res.status(404).json({ success: false, error: 'Trip not found' });
@@ -1921,6 +2379,14 @@ router.get('/:id/documents/:docId', protect, requirePermission('trips', 'read'),
 
     const doc = trip.documents.id(req.params.docId);
     if (!doc) return res.status(404).json({ success: false, error: 'Document not found' });
+    if (!doc.dataUrl) {
+      return res.status(410).json({
+        success: false,
+        error: doc.archivedAt
+          ? `This file was archived on ${doc.archivedAt.toLocaleDateString('en-IN')} under the retention policy — restore it from a backup if needed`
+          : 'No file is stored for this document'
+      });
+    }
 
     res.json({ success: true, document: doc });
   } catch (error) {
@@ -1961,7 +2427,7 @@ router.delete('/:id/documents/:docId', protect, requirePermission('trips', 'upda
 // POST /api/trip-orders/:id/events — record something by hand. System events
 // are written by the handlers above; this is the operator noting a breakdown, a
 // police check, a customer call.
-router.post('/:id/events', protect, requirePermission('trips', 'update'), async (req, res) => {
+router.post('/:id/events', protect, requireTripUpdateOrDriver, async (req, res) => {
   try {
     const trip = await findTrip(req);
     if (!trip) return res.status(404).json({ success: false, error: 'Trip not found' });
@@ -1989,6 +2455,22 @@ router.post('/:id/events', protect, requirePermission('trips', 'update'), async 
     });
 
     await trip.save();
+
+    // A problem the driver reports from the road goes to the office's bell
+    // (and so to email/webhooks via the scheduler), not only onto the trip.
+    if (isDriverSeat(req) && ['warning', 'critical'].includes(severity)) {
+      await Notification.create({
+        owner: req.accountId,
+        type: 'alert',
+        category: 'driver_report',
+        severity,
+        title: severity === 'critical' ? 'Driver needs help' : 'Driver reported a problem',
+        message: `${req.user.name} on trip ${trip.tripNumber}${trip.vehicleNumber ? ` (${trip.vehicleNumber})` : ''}: ${message.replace(/^Driver reported:\s*/, '')}`,
+        vehicle: trip.vehicleNumber || req.user.name,
+        lat: Number.isFinite(lat) ? lat : null,
+        lng: Number.isFinite(lng) ? lng : null
+      }).catch((err) => console.error('[trip-orders] driver report alert failed:', err.message));
+    }
 
     res.status(201).json({ success: true, events: trip.events });
   } catch (error) {

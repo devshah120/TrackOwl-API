@@ -65,6 +65,9 @@ const driverDocumentSchema = new mongoose.Schema({
   // An identity proof does not expire; a licence and a training endorsement do.
   // Optional, and a document without one is never chased.
   expiryDate: { type: Date, index: true },
+  // This document's own reminder stages, in days before expiry (brief §4
+  // "reminder settings"). Empty = the account's stages (Alert Settings).
+  reminderDays: { type: [Number], default: undefined },
   notes: { type: String, trim: true, default: '' },
 
   attachment: { type: attachmentSchema, default: () => ({}) },

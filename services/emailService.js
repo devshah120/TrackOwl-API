@@ -166,6 +166,50 @@ export const sendTripCreatedEmail = async (email, name, trip, deviceName) => {
   }
 };
 
+// Escapes text going into the alert digest's HTML. Alert messages carry
+// vehicle numbers, geofence names and driver names typed by users.
+const escapeHtml = (v) =>
+  String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+const SEVERITY_COLOURS = { critical: '#dc2626', warning: '#d97706', info: '#2563eb' };
+
+// One email listing the new alerts for an account, sent by the scheduler
+// (services/scheduler.js) — a digest, so a burst of overspeed alerts is one
+// mail, not twenty.
+export const sendAlertDigestEmail = async (recipients, companyName, alerts, appUrl = '') => {
+  if (!recipients?.length || !alerts?.length) return false;
+  const rows = alerts
+    .map(
+      (a) => `<tr>
+        <td style="padding:8px;border-bottom:1px solid #e5e7eb;"><span style="color:${SEVERITY_COLOURS[a.severity] || '#374151'};font-weight:600;text-transform:capitalize;">${escapeHtml(a.severity || 'info')}</span></td>
+        <td style="padding:8px;border-bottom:1px solid #e5e7eb;"><strong>${escapeHtml(a.title)}</strong><br><span style="color:#4b5563;">${escapeHtml(a.message)}</span></td>
+        <td style="padding:8px;border-bottom:1px solid #e5e7eb;color:#6b7280;white-space:nowrap;">${escapeHtml(new Date(a.createdAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }))}</td>
+      </tr>`
+    )
+    .join('');
+  const critical = alerts.filter((a) => a.severity === 'critical').length;
+  const mailOptions = {
+    from: process.env.EMAIL_FROM || process.env.EMAIL_USER,
+    to: recipients.join(', '),
+    subject: `TrackOwl - ${alerts.length} new alert${alerts.length === 1 ? '' : 's'}${critical ? ` (${critical} critical)` : ''}${companyName ? ` · ${companyName}` : ''}`,
+    html: `<!DOCTYPE html><html><body style="font-family:Inter,Arial,sans-serif;background:#f9fafb;padding:20px;">
+      <div style="max-width:680px;margin:0 auto;background:#fff;border-radius:8px;padding:24px;">
+        <h2 style="margin:0 0 4px;color:#111827;">Track<span style="color:#2563eb;">Owl</span> alerts</h2>
+        <p style="color:#4b5563;margin:0 0 16px;">${alerts.length} new alert${alerts.length === 1 ? '' : 's'} on ${escapeHtml(companyName || 'your account')}.</p>
+        <table style="width:100%;border-collapse:collapse;font-size:14px;">${rows}</table>
+        ${appUrl ? `<p style="margin-top:20px;"><a href="${escapeHtml(appUrl)}/alerts" style="color:#2563eb;">Open alerts in TrackOwl</a></p>` : ''}
+        <p style="color:#9ca3af;font-size:12px;margin-top:20px;">Change who gets these under Alerts &amp; Geofences → Alert Settings.</p>
+      </div></body></html>`
+  };
+  try {
+    await transporter.sendMail(mailOptions);
+    return true;
+  } catch (error) {
+    console.error('Alert digest email error:', error.message);
+    return false;
+  }
+};
+
 // Send an email when a trip is marked completed.
 export const sendTripCompletedEmail = async (email, name, trip, deviceName) => {
   const mailOptions = {

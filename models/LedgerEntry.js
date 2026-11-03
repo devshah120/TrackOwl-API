@@ -15,7 +15,15 @@ const ledgerEntrySchema = new mongoose.Schema({
   },
   category: {
     type: String,
-    enum: ['Trip', 'Fuel', 'Toll', 'Maintenance', 'Salary', 'Other'],
+    // The first six are the original set. The rest let overheads and the
+    // accounting heads the brief calls out be recorded, and each is treated
+    // deliberately by the Finance view (services/finance.js):
+    //   P&L overheads:   Salary, Office, Insurance, Permit & Tax, Other
+    //   P&L finance:     EMI Interest, Depreciation
+    //   Cash only:       EMI Principal, GST (balance-sheet movements, not costs)
+    //   Cash only:       Trip, Fuel, Toll, Maintenance — already costed by the
+    //                    trip, fuel and maintenance modules
+    enum: ['Trip', 'Fuel', 'Toll', 'Maintenance', 'Salary', 'Office', 'Insurance', 'Permit & Tax', 'EMI Principal', 'EMI Interest', 'Depreciation', 'GST', 'Other'],
     required: true
   },
   description: { type: String, trim: true, default: '' },

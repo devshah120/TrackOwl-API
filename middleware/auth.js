@@ -1,5 +1,7 @@
 import jwt from 'jsonwebtoken';
+import mongoose from 'mongoose';
 import User from '../models/User.js';
+import Driver from '../models/Driver.js';
 import { ROLES, hasPermission } from '../utils/permissions.js';
 
 export const protect = async (req, res, next) => {
@@ -50,6 +52,16 @@ export const protect = async (req, res, next) => {
     // rather than by req.user._id, which is what makes an account's staff seats
     // share one set of trucks, trips and ledger entries.
     req.accountId = user.account || user._id;
+
+    // A Driver seat sees only the trips it is driving. The seat is tied to its
+    // Driver profile by mobile number — the one field both records require and
+    // that identifies a person — so no extra linking step is needed when an
+    // admin creates the login. With no matching profile the seat gets an id
+    // that matches nothing, never "no filter".
+    if (user.role === ROLES.DRIVER) {
+      const profile = await Driver.findOne({ owner: req.accountId, mobile: user.mobile }).select('_id').lean();
+      req.driverProfileId = profile?._id || new mongoose.Types.ObjectId();
+    }
     next();
   } catch (error) {
     res.status(401).json({
@@ -101,4 +113,22 @@ export const requirePermission = (resource, action) => (req, res, next) => {
   }
 
   next();
+};
+
+// Is this request from a Driver seat? Routes use it to narrow what a driver
+// sees to their own assigned work.
+export const isDriverSeat = (req) => req.user?.role === ROLES.DRIVER;
+
+// The narrow "limited trip updates" grant from the brief: a Driver seat may
+// record the things only the person on the truck can — start and end readings,
+// stop arrivals, proof of delivery, photos and incidents — on a trip that is
+// already scoped to them, without holding the general trips:update grant that
+// would also let them rewrite the money and the route.
+export const requireTripUpdateOrDriver = (req, res, next) => {
+  if (!req.user) return res.status(401).json({ success: false, error: 'Not authenticated' });
+  if (hasPermission(req.user.role, 'trips', 'update') || isDriverSeat(req)) return next();
+  return res.status(403).json({
+    success: false,
+    error: 'Your role does not permit this action (trips:update)'
+  });
 };

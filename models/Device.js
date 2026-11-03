@@ -79,6 +79,22 @@ const deviceSchema = new mongoose.Schema({
   manufacturer: { type: String, trim: true, default: '' },
   firmwareVersion: { type: String, trim: true, default: '' },
 
+  // How the unit talks to the gateway (brief §10.1). `protocol` is the Traccar
+  // protocol name (teltonika, gt06, osmand…); `reportedProtocol` is what the
+  // gateway actually saw on the last packet, so a mis-set unit shows up as a
+  // mismatch. `configuration` holds what was programmed into it.
+  protocol: { type: String, trim: true, lowercase: true, default: '' },
+  reportedProtocol: { type: String, trim: true, lowercase: true, default: '' },
+  configuration: {
+    serverHost: { type: String, trim: true, default: '' },
+    serverPort: { type: Number, min: 1, max: 65535, default: null },
+    apn: { type: String, trim: true, default: '' },
+    // Seconds between fixes while moving / while parked.
+    movingIntervalSec: { type: Number, min: 1, max: 86400, default: null },
+    stoppedIntervalSec: { type: Number, min: 1, max: 86400, default: null },
+    notes: { type: String, trim: true, default: '' }
+  },
+
   // The data SIM fitted to the unit. Kept on the device rather than in its own
   // master because a SIM lives and dies with the box it is sealed into.
   sim: {
@@ -121,6 +137,23 @@ const deviceSchema = new mongoose.Schema({
   lastSeenAt: {
     type: Date,
     index: true
+  },
+  // Counters for the packets ingestion refused to treat as the live position
+  // (invalid fix, impossible jump, duplicate, out of order). A unit whose
+  // rejected count climbs is a unit to inspect — see services/positionQuality.js.
+  ingestStats: {
+    accepted: { type: Number, default: 0 },
+    rejected: { type: Number, default: 0 },
+    duplicates: { type: Number, default: 0 },
+    outOfOrder: { type: Number, default: 0 },
+    lastRejectReason: { type: String, default: '' },
+    lastRejectAt: Date
+  },
+  // Cross-fix memory for the alert engine (services/gpsAlerts.js): when idling
+  // began, which geofences the vehicle is inside and since when.
+  alertState: {
+    type: mongoose.Schema.Types.Mixed,
+    default: undefined
   },
   createdAt: {
     type: Date,

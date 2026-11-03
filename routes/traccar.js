@@ -3,6 +3,8 @@ import crypto from 'crypto';
 import Device from '../models/Device.js';
 import Position from '../models/Position.js';
 import { isValidImei } from '../services/deviceRegistration.js';
+import { assessFix } from '../services/positionQuality.js';
+import { evaluateFix } from '../services/gpsAlerts.js';
 
 const router = express.Router();
 
@@ -34,6 +36,22 @@ const asBool = (value) => value === true || value === 'true' || value === 1 || v
  * POST /api/traccar/forward
  * Called by Traccar itself (forward.enable=true, forward.type=json).
  * Body: { position: {...}, device: {...} }
+ *
+ * Every packet is answered 200 once it has been dealt with — including the
+ * ones that are discarded as duplicates or kept only as history. Traccar
+ * retries anything else, and a retried duplicate is exactly what this guards
+ * against.
+ *
+ * What happens to a packet:
+ *   duplicate     same device, fix time and coordinates as a stored fix
+ *                 (a reconnect replaying its buffer) — dropped.
+ *   rejected      fails services/positionQuality.js — stored with
+ *                 valid:false, so trails and replays skip it, and never
+ *                 becomes the live position.
+ *   out of order  valid but older than the live position (buffered data
+ *                 arriving after newer data) — stored as history only.
+ *   current       valid and newest — becomes the live position and is run
+ *                 through the alert engine.
  */
 router.post('/forward', async (req, res) => {
   if (!secretMatches(req.get('X-Traccar-Secret'))) {
@@ -47,7 +65,6 @@ router.post('/forward', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Missing position coordinates' });
     }
 
-    // Traccar always knows the device; uniqueId is our join key.
     const uniqueId = device?.uniqueId || String(position.deviceId);
     if (!uniqueId) {
       return res.status(400).json({ success: false, error: 'Missing device uniqueId' });
@@ -56,32 +73,57 @@ router.post('/forward', async (req, res) => {
     const attributes = position.attributes || {};
     const ignition = asBool(attributes.ignition);
     const fixTime = parseTime(position.fixTime ?? position.deviceTime);
+    const speed = (position.speed || 0) * KNOTS_TO_KMH;
 
-    // Auto-register on first sighting so a new phone just works.
-    const trackedDevice = await Device.findOneAndUpdate(
+    // The device has communicated, whatever the packet turns out to be worth —
+    // lastSeenAt is "when did it last talk to us", which is what the offline
+    // alert and the "last communication" column need.
+    //
+    // new:false returns the device as it was before this packet, so its
+    // lastPosition is the previous live fix. A brand-new unit returns null.
+    const before = await Device.findOneAndUpdate(
       { uniqueId },
       {
         $set: {
           traccarId: position.deviceId ?? device?.id,
           lastSeenAt: new Date(),
-          lastPosition: {
-            latitude: position.latitude,
-            longitude: position.longitude,
-            speed: (position.speed || 0) * KNOTS_TO_KMH,
-            course: position.course || 0,
-            ignition,
-            fixTime
-          }
+          ...(position.protocol ? { reportedProtocol: String(position.protocol).toLowerCase() } : {})
         },
-        // deviceType is set here rather than left to the schema default: an
-        // upsert runs defaults with no document, so the default can't see uniqueId.
         $setOnInsert: {
           uniqueId,
           name: device?.name || `Device ${uniqueId}`,
           deviceType: isValidImei(uniqueId) ? 'hardware' : 'phone'
         }
       },
-      { upsert: true, new: true, setDefaultsOnInsert: true }
+      { upsert: true, new: false, setDefaultsOnInsert: true }
+    );
+    const trackedDevice = before || (await Device.findOne({ uniqueId }));
+
+    const duplicate = await Position.exists({
+      device: trackedDevice._id,
+      fixTime,
+      latitude: position.latitude,
+      longitude: position.longitude
+    });
+    if (duplicate) {
+      await Device.updateOne({ _id: trackedDevice._id }, { $inc: { 'ingestStats.duplicates': 1 } });
+      return res.status(200).json({ success: true, duplicate: true });
+    }
+
+    // The quality check compares against the nearest earlier good fix, not the
+    // live one, so an out-of-order packet is judged against its own neighbour.
+    const previousGood = await Position.findOne({
+      device: trackedDevice._id,
+      valid: { $ne: false },
+      fixTime: { $lt: fixTime }
+    })
+      .sort({ fixTime: -1 })
+      .select('latitude longitude fixTime')
+      .lean();
+
+    const verdict = assessFix(
+      { latitude: position.latitude, longitude: position.longitude, fixTime, valid: position.valid !== false },
+      previousGood
     );
 
     await Position.create({
@@ -89,27 +131,67 @@ router.post('/forward', async (req, res) => {
       deviceUniqueId: uniqueId,
       latitude: position.latitude,
       longitude: position.longitude,
-      speed: (position.speed || 0) * KNOTS_TO_KMH,
+      speed,
       course: position.course || 0,
       altitude: position.altitude,
       accuracy: position.accuracy,
       ignition,
       battery: attributes.batteryLevel ?? attributes.battery,
       motion: asBool(attributes.motion),
-      valid: position.valid !== false,
+      valid: verdict.valid,
       protocol: position.protocol,
       fixTime,
       serverTime: new Date(),
-      attributes
+      attributes: verdict.valid ? attributes : { ...attributes, rejectReason: verdict.reason }
     });
+
+    if (!verdict.valid) {
+      await Device.updateOne(
+        { _id: trackedDevice._id },
+        {
+          $inc: { 'ingestStats.rejected': 1 },
+          $set: { 'ingestStats.lastRejectReason': verdict.reason, 'ingestStats.lastRejectAt': new Date() }
+        }
+      );
+      console.warn(`[traccar] ${uniqueId} fix rejected (${verdict.reason})`);
+      return res.status(200).json({ success: true, accepted: false, reason: verdict.reason });
+    }
+
+    const live = {
+      latitude: position.latitude,
+      longitude: position.longitude,
+      speed,
+      course: position.course || 0,
+      ignition,
+      fixTime
+    };
+
+    // Only a fix newer than the live one may replace it. The filter repeats the
+    // comparison so two packets racing each other cannot leave the older one in
+    // place.
+    const promoted = await Device.updateOne(
+      {
+        _id: trackedDevice._id,
+        $or: [{ 'lastPosition.fixTime': { $exists: false } }, { 'lastPosition.fixTime': null }, { 'lastPosition.fixTime': { $lt: fixTime } }]
+      },
+      { $set: { lastPosition: live }, $inc: { 'ingestStats.accepted': 1 } }
+    );
+
+    if (promoted.modifiedCount === 0) {
+      await Device.updateOne({ _id: trackedDevice._id }, { $inc: { 'ingestStats.outOfOrder': 1 } });
+      return res.status(200).json({ success: true, accepted: true, current: false });
+    }
+
+    // Not awaited: alerts are a side effect and must not hold Traccar's
+    // connection open. evaluateFix catches its own errors.
+    evaluateFix(trackedDevice, live, before?.lastPosition?.fixTime ? before.lastPosition : null);
 
     console.log(
       `[traccar] ${uniqueId} @ ${position.latitude.toFixed(5)},${position.longitude.toFixed(5)} ` +
-      `speed=${((position.speed || 0) * KNOTS_TO_KMH).toFixed(1)}km/h ignition=${ignition}`
+      `speed=${speed.toFixed(1)}km/h ignition=${ignition}`
     );
 
-    // Traccar only needs a 2xx; a non-2xx makes it retry.
-    res.status(200).json({ success: true });
+    res.status(200).json({ success: true, accepted: true, current: true });
   } catch (error) {
     console.error('[traccar] forward failed:', error.message);
     res.status(500).json({ success: false, error: 'Failed to store position' });

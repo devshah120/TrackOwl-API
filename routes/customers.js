@@ -4,6 +4,9 @@ import TripOrder from '../models/TripOrder.js';
 import { protect, requirePermission } from '../middleware/auth.js';
 import { auditCreate, auditUpdate, auditDelete } from '../utils/audit.js';
 import { ACTIVE_STATUSES } from '../utils/tripOrders.js';
+import Invoice from '../models/Invoice.js';
+import { hasPermission } from '../utils/permissions.js';
+import { isOverdue, daysOverdue } from '../services/invoiceMath.js';
 
 const router = express.Router();
 
@@ -162,10 +165,51 @@ router.get('/:id', protect, requirePermission('customers', 'read'), async (req, 
         .lean()
     ]);
 
+    // Revenue from the trips themselves (ex-GST, net of discount), so the
+    // figure matches the Finance view's basis.
+    const revenueTrips = await TripOrder.find({ owner: req.accountId, customer: customer._id, status: { $nin: ['draft', 'cancelled'] } })
+      .select('revenue.category revenue.amount')
+      .lean();
+    const tripRevenue = Math.round(
+      revenueTrips.reduce(
+        (s, t) => s + (t.revenue || []).reduce((x, l) => (l.category === 'tax' ? x : l.category === 'discount' ? x - l.amount : x + l.amount), 0),
+        0
+      ) * 100
+    ) / 100;
+
+    // Invoice history and the receivable position (brief §9.1) — only for a
+    // seat that may see billing.
+    let account = null;
+    let invoices = [];
+    if (hasPermission(req.user.role, 'billing', 'read')) {
+      const all = await Invoice.find({ owner: req.accountId, customer: customer._id, status: { $ne: 'cancelled' } })
+        .sort({ invoiceDate: -1 })
+        .select('invoiceNumber invoiceDate dueDate status totals')
+        .lean();
+      const live = all.filter((i) => i.status !== 'draft');
+      const sum = (key) => Math.round(live.reduce((s, i) => s + (i.totals?.[key] || 0), 0) * 100) / 100;
+      const overdue = live.filter((i) => isOverdue(i));
+      const outstanding = sum('balance');
+      account = {
+        invoiced: sum('total'),
+        received: sum('received'),
+        adjusted: sum('adjusted'),
+        outstanding,
+        overdue: Math.round(overdue.reduce((s, i) => s + i.totals.balance, 0) * 100) / 100,
+        overdueCount: overdue.length,
+        invoiceCount: live.length,
+        creditLimit: customer.creditLimit ?? null,
+        overCreditLimit: customer.creditLimit != null && outstanding > customer.creditLimit
+      };
+      invoices = all.slice(0, 15).map((i) => ({ ...i, overdue: isOverdue(i), daysOverdue: daysOverdue(i) }));
+    }
+
     res.json({
       success: true,
       customer,
-      summary: { tripCount, activeCount },
+      summary: { tripCount, activeCount, tripRevenue },
+      account,
+      invoices,
       recentTrips
     });
   } catch (error) {

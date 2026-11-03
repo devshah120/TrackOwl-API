@@ -4,6 +4,7 @@ import Truck from '../models/Truck.js';
 import Driver from '../models/Driver.js';
 import { protect, requirePermission } from '../middleware/auth.js';
 import { auditCreate, auditUpdate, auditDelete } from '../utils/audit.js';
+import { ALLOWED_UPLOAD_TYPES, UPLOAD_TYPE_ERROR } from '../utils/validators.js';
 
 const router = express.Router();
 
@@ -51,6 +52,7 @@ const validateLinks = async (req, fields) => {
     if (!/^data:/.test(fields.receipt.dataUrl)) {
       return 'Receipt must be an uploaded file';
     }
+    if (!ALLOWED_UPLOAD_TYPES.test(fields.receipt.dataUrl)) return `Receipt ${UPLOAD_TYPE_ERROR}`;
     if (fields.receipt.dataUrl.length > MAX_RECEIPT_CHARS) {
       return 'That receipt is too large — please upload a file under 3 MB';
     }

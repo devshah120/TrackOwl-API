@@ -189,7 +189,9 @@ const documentSchema = new mongoose.Schema({
   filename: { type: String, trim: true, default: '' },
   mimeType: { type: String, trim: true, default: '' },
   uploadedAt: { type: Date, default: Date.now },
-  uploadedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null }
+  uploadedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  // Set when the retention policy removed the stored file (services/retention.js).
+  archivedAt: { type: Date, default: null }
 });
 
 // Every status the trip has been through, in order. Written by the status
@@ -247,6 +249,43 @@ const readingSchema = new mongoose.Schema(
     lng: { type: Number, default: null },
     location: { type: String, trim: true, default: '' },
     by: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null }
+  },
+  { _id: false }
+);
+
+// Money moving between the office and the driver for this trip. Three kinds,
+// all stored as positive amounts with the direction carried by `kind`:
+//   advance             office -> driver, before or during the trip
+//   settlement_payment  office -> driver, paying out the balance at settlement
+//   recovery            driver -> office, returning unspent advance
+// Each line has its own _id and is never merged with another, so the same
+// advance cannot be counted twice — see services/tripSettlement.js.
+export const DRIVER_MONEY_KINDS = ['advance', 'settlement_payment', 'recovery'];
+
+const driverMoneySchema = new mongoose.Schema({
+  kind: { type: String, enum: DRIVER_MONEY_KINDS, default: 'advance' },
+  amount: { type: Number, required: true, min: 0.01 },
+  paidAt: { type: Date, default: Date.now },
+  paymentMode: { type: String, enum: PAYMENT_MODES, default: 'Cash' },
+  reference: { type: String, trim: true, default: '' },
+  notes: { type: String, trim: true, default: '' },
+  createdAt: { type: Date, default: Date.now },
+  createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  createdByName: { type: String, trim: true, default: '' }
+});
+
+// A correction to an odometer reading after it was taken. Kept on the trip as
+// well as in the audit log, so the trip itself shows that its distance was
+// adjusted, by whom, and why.
+const readingCorrectionSchema = new mongoose.Schema(
+  {
+    reading: { type: String, enum: ['start', 'end'], required: true },
+    from: { type: Number, default: null },
+    to: { type: Number, required: true },
+    reason: { type: String, trim: true, required: true },
+    at: { type: Date, default: Date.now },
+    by: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    byName: { type: String, trim: true, default: '' }
   },
   { _id: false }
 );
@@ -377,6 +416,34 @@ const tripOrderSchema = new mongoose.Schema({
 
   events: { type: [eventSchema], default: [] },
   documents: { type: [documentSchema], default: [] },
+
+  // --- Settlement ----------------------------------------------------------
+  driverMoney: { type: [driverMoneySchema], default: [] },
+  readingCorrections: { type: [readingCorrectionSchema], default: [] },
+
+  // Review and close-out. `reviewedSignature` fingerprints the figures that
+  // were reviewed (see services/tripSettlement.js): if any money line or
+  // reading changes afterwards the fingerprint no longer matches, and closing
+  // asks for a fresh review instead of trusting a stale one.
+  settlement: {
+    reviewedAt: { type: Date, default: null },
+    reviewedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    reviewedByName: { type: String, trim: true, default: '' },
+    reviewNotes: { type: String, trim: true, default: '' },
+    reviewedSignature: { type: String, default: '' },
+    closedAt: { type: Date, default: null },
+    closedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    closedByName: { type: String, trim: true, default: '' },
+    // Set when the trip was closed with checks still failing.
+    override: {
+      used: { type: Boolean, default: false },
+      reason: { type: String, trim: true, default: '' },
+      skippedChecks: { type: [String], default: [] }
+    },
+    // The settlement figures frozen at close, so the closed record does not
+    // move if a calculation rule is refined later.
+    snapshot: { type: mongoose.Schema.Types.Mixed, default: null }
+  },
 
   // --- Links to the records that already existed ---------------------------
   // The GPS route/trail record. Created alongside the trip when the assigned

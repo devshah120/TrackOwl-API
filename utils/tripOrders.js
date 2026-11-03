@@ -68,6 +68,8 @@ export const TRIP_STATUSES = [
   'unloading',
   'delivered',
   'completed',
+  'pending_settlement',
+  'closed',
   'cancelled',
   'on_hold'
 ];
@@ -86,14 +88,24 @@ export const TRIP_STATUS_LABELS = {
   unloading: 'Unloading',
   delivered: 'Delivered',
   completed: 'Completed',
+  pending_settlement: 'Pending Settlement',
+  closed: 'Closed',
   cancelled: 'Cancelled',
   on_hold: 'On Hold'
 };
 
-// Statuses that mean the trip is over. No further movement is recorded against
-// them, and they are excluded from the "already busy" checks when assigning a
-// vehicle or driver to something else.
-export const TERMINAL_STATUSES = ['completed', 'cancelled'];
+// Statuses that mean the trip is over and its record is locked. No further
+// change is accepted against them.
+//
+// `completed` and `pending_settlement` are deliberately NOT terminal: the goods
+// have landed, but the actual expenses, the driver's advance and the POD are
+// still being finalised, so those tabs must stay editable. A trip only locks
+// when settlement is reviewed and it is Closed (POST /:id/close).
+export const TERMINAL_STATUSES = ['closed', 'cancelled'];
+
+// Delivered-and-done, awaiting or under settlement. Not on the road, so these
+// never hold a vehicle or driver, but not yet locked either.
+export const SETTLEMENT_STATUSES = ['completed', 'pending_settlement'];
 
 // Statuses where the vehicle is out on the job. This is what makes a vehicle or
 // driver busy: a trip in any of these holds its resources, so assigning the
@@ -127,6 +139,8 @@ export const LEGACY_TRIP_STATUS = {
   unloading: 'active',
   delivered: 'active',
   completed: 'completed',
+  pending_settlement: 'completed',
+  closed: 'completed',
   cancelled: 'cancelled',
   on_hold: 'planned'
 };
@@ -156,7 +170,11 @@ export const STATUS_TRANSITIONS = {
   at_destination: ['unloading', 'in_transit'],
   unloading: ['delivered', 'at_destination'],
   delivered: ['completed', 'unloading'],
-  completed: [],
+  // Closing is its own endpoint (POST /:id/close) with its own checks, so
+  // `closed` is never a plain status move.
+  completed: ['pending_settlement'],
+  pending_settlement: ['completed'],
+  closed: [],
   cancelled: [],
   on_hold: []
 };
@@ -165,7 +183,7 @@ export const STATUS_TRANSITIONS = {
 // already finished. Held separately from STATUS_TRANSITIONS because they are
 // escapes from the flow rather than steps along it.
 const INTERRUPTIBLE = TRIP_STATUSES.filter(
-  (s) => !TERMINAL_STATUSES.includes(s) && s !== 'on_hold'
+  (s) => !TERMINAL_STATUSES.includes(s) && !SETTLEMENT_STATUSES.includes(s) && s !== 'on_hold'
 );
 
 // May this trip move from `from` to `to`? Returns a reason string when it may
