@@ -315,7 +315,7 @@ const tripOrderSchema = new mongoose.Schema({
   // Where a held trip goes back to when it resumes. Stamped when the trip is
   // put on hold and cleared when it leaves; without it, coming off hold would
   // have to guess a status and could silently skip a step.
-  heldFrom: { type: String, enum: TRIP_STATUSES, default: null },
+  heldFrom: { type: String, enum: [...TRIP_STATUSES, null], default: null },
 
   statusHistory: { type: [statusHistorySchema], default: [] },
 

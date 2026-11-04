@@ -24,7 +24,7 @@ const checkSchema = new mongoose.Schema(
     voltage: { type: Number, min: 0, default: null },
     // The tester's verdict, which is not derivable from the voltage above — a
     // tired battery reads fine at rest and collapses under load.
-    health: { type: String, enum: BATTERY_HEALTH, default: null },
+    health: { type: String, enum: [...BATTERY_HEALTH, null], default: null },
     // Specific gravity, where a hydrometer was used on a serviceable battery.
     specificGravity: { type: Number, min: 0, default: null },
     checkedBy: { type: String, trim: true, default: '' },
